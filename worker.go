@@ -3,6 +3,7 @@ package gokiq
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/rand"
 	"os"
 	"os/signal"
@@ -30,15 +31,36 @@ type Job struct {
 	FailedAt     string `json:"failed_at,omitempty"`
 }
 
+func (job *Job) FromJSON(data []byte) error {
+	err := json.Unmarshal(data, job)
+	if err != nil {
+		return err
+	}
+	if max, ok := job.Retry.(float64); ok {
+		job.MaxRetries = int(max)
+	} else if r, ok := job.Retry.(bool); ok && !r {
+	} else {
+		job.MaxRetries = defaultMaxRetries
+	}
+	return nil
+}
+
+func (job *Job) JSON() []byte {
+	res, _ := json.Marshal(job)
+	return res
+}
+
 type message struct {
 	job *Job
 	die bool
 }
 
 const (
-	TimestampFormat = "2006-01-02 15:04:05 MST"
-	redisTimeout    = 1
-	maxIdleRedis    = 1
+	TimestampFormat     = "2006-01-02 15:04:05 MST"
+	redisTimeout        = 1
+	maxIdleRedis        = 1
+	defaultMaxRetries   = 25
+	defaultPollInterval = 5
 )
 
 type QueueConfig map[string]int
@@ -50,21 +72,24 @@ type Worker interface {
 var Workers = NewWorkerConfig()
 
 type WorkerConfig struct {
-	RedisServer string
-	Queues      QueueConfig
-	WorkerCount int
-	ReportError func(error, *Job)
+	RedisServer    string
+	RedisNamespace string
+	Queues         QueueConfig
+	WorkerCount    int
+	PollInterval   int
+	ReportError    func(error, *Job)
 
 	workerMapping map[string]reflect.Type
 	randomQueues  []string
 	redisPool     *redis.Pool
 	workQueue     chan message
 	doneQueue     chan bool
-	sync.Mutex
+	sync.RWMutex  // R is locked by Run() and scheduler(), W is locked by quitHandler() when it receives a signal
 }
 
 func NewWorkerConfig() *WorkerConfig {
 	return &WorkerConfig{
+		PollInterval:  defaultPollInterval,
 		ReportError:   func(error, *Job) {},
 		workerMapping: make(map[string]reflect.Type),
 		workQueue:     make(chan message),
@@ -84,12 +109,15 @@ func (w *WorkerConfig) Run() {
 		go w.worker()
 	}
 
-	go w.retryScheduler()
+	go w.scheduler()
 	go w.quitHandler()
 
 	for {
-		w.Lock() // don't let quitHandler() stop us in the middle of a job
+		w.RLock() // don't let quitHandler() stop us in the middle of a job
 		msg, err := redis.Bytes(w.redisQuery("BLPOP", append(w.queueList(), redisTimeout)))
+		if err == redis.ErrNil {
+			continue
+		}
 		if err != nil {
 			w.handleError(err)
 			time.Sleep(redisTimeout * time.Second) // likely a transient redis error, sleep before retrying
@@ -97,15 +125,14 @@ func (w *WorkerConfig) Run() {
 		}
 
 		job := &Job{}
-		json.Unmarshal(msg, job)
+		err = job.FromJSON(msg)
 		if err != nil {
 			w.handleError(err)
 			continue
 		}
 		w.workQueue <- message{job: job}
 
-		w.Unlock()
-		time.Sleep(time.Microsecond) // give quitHandler() time to grab the lock
+		w.RUnlock()
 	}
 }
 
@@ -113,7 +140,7 @@ func (w *WorkerConfig) Run() {
 func (w *WorkerConfig) denormalizeQueues() {
 	for queue, x := range w.Queues {
 		for i := 0; i < x; i++ {
-			w.randomQueues = append(w.randomQueues, "queue:"+queue)
+			w.randomQueues = append(w.randomQueues, w.nsKey("queue:"+queue))
 		}
 	}
 }
@@ -141,10 +168,52 @@ func (w *WorkerConfig) handleError(err error) {
 	w.ReportError(err, nil)
 }
 
-// checks the sorted set of scheduled retries and queues them when it's time
-func (w *WorkerConfig) retryScheduler() {
-	for _ = range time.Tick(time.Second) {
+// checks the sorted set of scheduled jobs and retries and queues them when it's time
+// TODO: move this to a Lua script
+func (w *WorkerConfig) scheduler() {
+	pollSets := []string{w.nsKey("retry"), w.nsKey("schedule")}
 
+	for _ = range time.Tick(time.Duration(w.PollInterval) * time.Second) {
+		w.RLock() // don't let quitHandler() stop us in the middle of a run
+		conn := w.redisPool.Get()
+		now := fmt.Sprintf("%f", currentTimeFloat())
+		for _, set := range pollSets {
+			conn.Send("MULTI")
+			conn.Send("ZRANGEBYSCORE", set, "-inf", now)
+			conn.Send("ZREMRANGEBYSCORE", set, "-inf", now)
+			res, err := redis.Values(conn.Do("EXEC"))
+			if err == redis.ErrNil { // TODO: check if this is possible
+				continue
+			}
+			if err != nil {
+				w.handleError(err)
+				continue
+			}
+
+			messages, _ := redis.Values(res, nil)
+			if messages == nil { // TODO: check if this is possible
+				continue
+			}
+
+			for _, msg := range messages {
+				parsedMsg := &struct{ queue string }{}
+				msgBytes := msg.([]byte)
+				err := json.Unmarshal(msgBytes, parsedMsg)
+				if err != nil {
+					w.handleError(err)
+					continue
+				}
+				conn.Send("MULTI")
+				conn.Send("SADD", w.nsKey("queues"), parsedMsg.queue)
+				conn.Send("RPUSH", w.nsKey("queue:"+parsedMsg.queue), msgBytes)
+				_, err = conn.Do("EXEC")
+				if err != nil {
+					w.handleError(err)
+				}
+			}
+		}
+		conn.Close()
+		w.RUnlock()
 	}
 }
 
@@ -156,7 +225,7 @@ func (w *WorkerConfig) quitHandler() {
 	signal.Notify(c, syscall.SIGQUIT)
 
 	for _ = range c {
-		w.Lock()           // wait for the current runner iteration to finish and stop it from continuing
+		w.Lock()           // wait for the current run loop and scheduler iterations to finish
 		close(w.workQueue) // tell worker goroutines to stop after they finish their current job
 		for i := 0; i < w.WorkerCount; i++ {
 			<-w.doneQueue // wait for workers to finish
@@ -211,9 +280,34 @@ func (w *WorkerConfig) worker() {
 
 func (w *WorkerConfig) scheduleRetry(job *Job, err error) {
 	w.ReportError(err, job)
-	// set failure details
-	// determine next retry and add to retry set
-	// log failure stat
+
+	job.RetryCount += 1
+
+	if job.RetryCount < job.MaxRetries {
+		job.ErrorType = fmt.Sprintf("%T", err)
+		job.ErrorMessage = err.Error()
+		job.FailedAt = time.Now().UTC().Format(TimestampFormat)
+
+		nextRetry := currentTimeFloat() + retryDelay(job.RetryCount)
+
+		w.redisQuery("ZADD", w.nsKey("retry"), fmt.Sprintf("%f", nextRetry), job.JSON())
+	}
+}
+
+func (w *WorkerConfig) nsKey(key string) string {
+	if w.RedisNamespace != "" {
+		return w.RedisNamespace + ":" + key
+	}
+	return key
+}
+
+// formula from Sidekiq (originally from delayed_job)
+func retryDelay(count int) float64 {
+	return math.Pow(float64(count), 4) + 15 + (float64(rand.Intn(30)) * (float64(count) + 1))
+}
+
+func currentTimeFloat() float64 {
+	return float64(time.Now().UnixNano()) / float64(time.Second)
 }
 
 func panicToError(err interface{}) error {
