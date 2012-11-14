@@ -60,7 +60,6 @@ type WorkerConfig struct {
 	redisPool     *redis.Pool
 	workQueue     chan message
 	doneQueue     chan bool
-	done          bool
 	sync.Mutex
 }
 
@@ -89,11 +88,7 @@ func (w *WorkerConfig) Run() {
 	go w.quitHandler()
 
 	for {
-		if w.done {
-			w.Lock() // we're done, so block until quitHandler() calls os.Exit()
-		}
-
-		w.Lock() // don't let quitHandler() stop us in the middle of the iteration
+		w.Lock() // don't let quitHandler() stop us in the middle of a job
 		msg, err := redis.Bytes(w.redisQuery("BLPOP", append(w.queueList(), redisTimeout)))
 		if err != nil {
 			w.handleError(err)
@@ -107,9 +102,10 @@ func (w *WorkerConfig) Run() {
 			w.handleError(err)
 			continue
 		}
-
 		w.workQueue <- message{job: job}
+
 		w.Unlock()
+		time.Sleep(time.Microsecond) // give quitHandler() time to grab the lock
 	}
 }
 
@@ -160,8 +156,7 @@ func (w *WorkerConfig) quitHandler() {
 	signal.Notify(c, syscall.SIGQUIT)
 
 	for _ = range c {
-		w.Lock()           // wait for the current runner iteration to finish
-		w.done = true      // tell the runner that we're done
+		w.Lock()           // wait for the current runner iteration to finish and stop it from continuing
 		close(w.workQueue) // tell worker goroutines to stop after they finish their current job
 		for i := 0; i < w.WorkerCount; i++ {
 			<-w.doneQueue // wait for workers to finish
