@@ -2,8 +2,13 @@ package gokiq
 
 import (
 	"encoding/json"
+	"fmt"
 	"math/rand"
+	"os"
+	"os/signal"
 	"reflect"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/garyburd/redigo/redis"
@@ -15,7 +20,7 @@ type Job struct {
 	Queue string        `json:"queue"`
 	ID    string        `json:"jid"`
 
-	Retry      interface{} `json:"retry"` // can be int (number of retries) or bool (true is default number)
+	Retry      interface{} `json:"retry"` // can be int (number of retries) or bool (true means default)
 	MaxRetries int
 	RetryCount int `json:"retry_count,omitmepty"`
 	RetriedAt  int `json:"retried_at,omitempty"`
@@ -32,7 +37,7 @@ type message struct {
 
 const (
 	TimestampFormat = "2006-01-02 15:04:05 MST"
-	redisTimeout    = 10
+	redisTimeout    = 1
 	maxIdleRedis    = 1
 )
 
@@ -45,18 +50,27 @@ type Worker interface {
 var Workers = NewWorkerConfig()
 
 type WorkerConfig struct {
-	RedisServer  string
-	Queues       QueueConfig
-	WorkerCount  int
-	ErrorHandler func(error)
+	RedisServer string
+	Queues      QueueConfig
+	WorkerCount int
+	ReportError func(error, *Job)
 
 	workerMapping map[string]reflect.Type
 	randomQueues  []string
 	redisPool     *redis.Pool
+	workQueue     chan message
+	doneQueue     chan bool
+	done          bool
+	sync.Mutex
 }
 
 func NewWorkerConfig() *WorkerConfig {
-	return &WorkerConfig{workerMapping: make(map[string]reflect.Type), ErrorHandler: func(error) {}}
+	return &WorkerConfig{
+		ReportError:   func(error, *Job) {},
+		workerMapping: make(map[string]reflect.Type),
+		workQueue:     make(chan message),
+		doneQueue:     make(chan bool),
+	}
 }
 
 func (w *WorkerConfig) Register(name string, worker Worker) {
@@ -64,21 +78,26 @@ func (w *WorkerConfig) Register(name string, worker Worker) {
 }
 
 func (w *WorkerConfig) Run() {
-	workQueue := make(chan message)
 	w.denormalizeQueues()
 	w.connectRedis()
 
 	for i := 0; i < w.WorkerCount; i++ {
-		go w.worker(workQueue)
+		go w.worker()
 	}
 
 	go w.retryScheduler()
-	//go w.quitHandler()
+	go w.quitHandler()
 
 	for {
+		if w.done {
+			w.Lock() // we're done, so block until quitHandler() calls os.Exit()
+		}
+
+		w.Lock() // don't let quitHandler() stop us in the middle of the iteration
 		msg, err := redis.Bytes(w.redisQuery("BLPOP", append(w.queueList(), redisTimeout)))
 		if err != nil {
 			w.handleError(err)
+			time.Sleep(redisTimeout * time.Second) // likely a transient redis error, sleep before retrying
 			continue
 		}
 
@@ -89,34 +108,8 @@ func (w *WorkerConfig) Run() {
 			continue
 		}
 
-		workQueue <- message{job: job}
-	}
-}
-
-func (w *WorkerConfig) connectRedis() {
-	w.redisPool = redis.NewPool(func() (redis.Conn, error) {
-		return redis.Dial("tcp", w.RedisServer)
-	}, maxIdleRedis)
-}
-
-func (w *WorkerConfig) redisQuery(command string, args ...interface{}) (interface{}, error) {
-	conn := w.redisPool.Get()
-	defer conn.Close()
-	return conn.Do(command, args...)
-}
-
-func (w *WorkerConfig) worker(incoming chan message) {
-	for msg := range incoming {
-		if msg.die {
-			return
-		}
-
-		typ, ok := w.workerMapping[msg.job.Type]
-		if !ok {
-			// fail
-		}
-		reflect.New(typ).Interface().(Worker).Perform(msg.job.Args)
-		// handle errors
+		w.workQueue <- message{job: job}
+		w.Unlock()
 	}
 }
 
@@ -124,7 +117,7 @@ func (w *WorkerConfig) worker(incoming chan message) {
 func (w *WorkerConfig) denormalizeQueues() {
 	for queue, x := range w.Queues {
 		for i := 0; i < x; i++ {
-			w.randomQueues = append(w.randomQueues, queue)
+			w.randomQueues = append(w.randomQueues, "queue:"+queue)
 		}
 	}
 }
@@ -149,12 +142,88 @@ func (w *WorkerConfig) queueList() []interface{} {
 
 func (w *WorkerConfig) handleError(err error) {
 	// TODO: log message to stdout
-	// TODO: sleep if redis connection error and try reconnect?
-	w.ErrorHandler(err)
+	w.ReportError(err, nil)
 }
 
+// checks the sorted set of scheduled retries and queues them when it's time
 func (w *WorkerConfig) retryScheduler() {
-	for _ = range time.Tick(1 * time.Second) {
+	for _ = range time.Tick(time.Second) {
 
 	}
+}
+
+// listens for SIGINT, SIGTERM, and SIGQUIT to perform a clean shutdown
+func (w *WorkerConfig) quitHandler() {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	signal.Notify(c, syscall.SIGTERM)
+	signal.Notify(c, syscall.SIGQUIT)
+
+	for _ = range c {
+		w.Lock()           // wait for the current runner iteration to finish
+		w.done = true      // tell the runner that we're done
+		close(w.workQueue) // tell worker goroutines to stop after they finish their current job
+		for i := 0; i < w.WorkerCount; i++ {
+			<-w.doneQueue // wait for workers to finish
+		}
+		os.Exit(0)
+	}
+}
+
+func (w *WorkerConfig) connectRedis() {
+	w.redisPool = redis.NewPool(func() (redis.Conn, error) {
+		return redis.Dial("tcp", w.RedisServer)
+	}, maxIdleRedis)
+}
+
+func (w *WorkerConfig) redisQuery(command string, args ...interface{}) (interface{}, error) {
+	conn := w.redisPool.Get()
+	defer conn.Close()
+	return conn.Do(command, args...)
+}
+
+func (w *WorkerConfig) worker() {
+	for msg := range w.workQueue {
+		if msg.die {
+			return
+		}
+
+		job := msg.job
+		typ, ok := w.workerMapping[msg.job.Type]
+		if !ok {
+			err := fmt.Errorf("Unknown worker type: %s", job.Type)
+			w.scheduleRetry(job, err)
+			continue
+		}
+
+		// wrap Perform() in a function so that we can recover from panics
+		var err error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// TODO: log stack trace
+					err = panicToError(r)
+				}
+			}()
+			err = reflect.New(typ).Interface().(Worker).Perform(msg.job.Args)
+		}()
+		if err != nil {
+			w.scheduleRetry(job, err)
+		}
+	}
+	w.doneQueue <- true
+}
+
+func (w *WorkerConfig) scheduleRetry(job *Job, err error) {
+	w.ReportError(err, job)
+	// set failure details
+	// determine next retry and add to retry set
+	// log failure stat
+}
+
+func panicToError(err interface{}) error {
+	if str, ok := err.(string); ok {
+		return fmt.Errorf(str)
+	}
+	return err.(error)
 }

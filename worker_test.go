@@ -27,20 +27,19 @@ func (s *WorkerSuite) SetUpSuite(c *C) {
 }
 
 func (s *WorkerSuite) TestWorkerLoop(c *C) {
-	queue := make(chan message)
 	testChan := make(chan bool)
 
-	go Workers.worker(queue)
+	go Workers.worker()
 
 	job := &Job{
-		Type: "TestWorker",
-		Args: []interface{}{testChan, true},
+		Type:  "TestWorker",
+		Args:  []interface{}{testChan, true},
 		Queue: "default",
-		ID: "123",
+		ID:    "123",
 		Retry: false,
 	}
 
-	queue <- message{job: job}
+	Workers.workQueue <- message{job: job}
 
 	res := <-testChan
 	c.Assert(res, Equals, true)
