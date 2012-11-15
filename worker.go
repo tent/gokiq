@@ -303,21 +303,21 @@ func (w *WorkerConfig) worker(id string) {
 func (w *WorkerConfig) scheduleRetry(job *Job, err error) {
 	w.ReportError(err, job)
 
+	now := time.Now().UTC().Format(TimestampFormat)
+	if job.FailedAt == "" {
+		job.FailedAt = now
+	} else {
+		job.RetryCount += 1
+	}
+	if job.RetryCount > 0 {
+		job.RetriedAt = now
+	}
+
 	log.Printf(`event=job_error job_id=%s job_type=%s queue=%s retries=%d max_retries=%d error_type=%T error_message="%s" pid=%d`, job.ID, job.Type, job.Queue, job.RetryCount, job.MaxRetries, err, err, pid)
 
 	if job.RetryCount < job.MaxRetries {
 		job.ErrorType = fmt.Sprintf("%T", err)
 		job.ErrorMessage = err.Error()
-
-		now := time.Now().UTC().Format(TimestampFormat)
-		if job.FailedAt == "" {
-			job.FailedAt = now
-		} else {
-			job.RetryCount += 1
-		}
-		if job.RetryCount > 0 {
-			job.RetriedAt = now
-		}
 
 		nextRetry := currentTimeFloat() + retryDelay(job.RetryCount)
 
