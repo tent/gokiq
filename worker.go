@@ -3,6 +3,7 @@ package gokiq
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"math/rand"
 	"os"
@@ -18,17 +19,19 @@ import (
 type Job struct {
 	Type  string        `json:"class"`
 	Args  []interface{} `json:"args"`
-	Queue string        `json:"queue"`
+	Queue string        `json:"queue,omitempty"`
 	ID    string        `json:"jid"`
 
 	Retry      interface{} `json:"retry"` // can be int (number of retries) or bool (true means default)
-	MaxRetries int
-	RetryCount int `json:"retry_count,omitmepty"`
-	RetriedAt  int `json:"retried_at,omitempty"`
+	MaxRetries int         `json:"-"`
+	RetryCount int         `json:"retry_count,omitempty"`
+	RetriedAt  int         `json:"retried_at,omitempty"`
 
 	ErrorMessage string `json:"error_message,omitempty"`
 	ErrorType    string `json:"error_class,omitempty"`
 	FailedAt     string `json:"failed_at,omitempty"`
+
+	StartTime time.Time `json:"-"`
 }
 
 func (job *Job) FromJSON(data []byte) error {
@@ -58,12 +61,20 @@ type message struct {
 const (
 	TimestampFormat     = "2006-01-02 15:04:05 MST"
 	redisTimeout        = 1
-	maxIdleRedis        = 1
 	defaultMaxRetries   = 25
 	defaultPollInterval = 5
+	keyExpiry           = 86400 // one day
 )
 
 type QueueConfig map[string]int
+
+func (q QueueConfig) String() string {
+	str := ""
+	for queue, priority := range q {
+		str += fmt.Sprintf("%s=%d,", queue, priority)
+	}
+	return str[:len(str)-1]
+}
 
 type Worker interface {
 	Perform([]interface{}) error
@@ -72,7 +83,7 @@ type Worker interface {
 var Workers = NewWorkerConfig()
 
 type WorkerConfig struct {
-	RedisServer    string
+	RedisServer    string // TODO: allow specifying redis db
 	RedisNamespace string
 	Queues         QueueConfig
 	WorkerCount    int
@@ -89,6 +100,7 @@ type WorkerConfig struct {
 
 func NewWorkerConfig() *WorkerConfig {
 	return &WorkerConfig{
+		RedisServer:   "127.0.0.1:6379",
 		PollInterval:  defaultPollInterval,
 		ReportError:   func(error, *Job) {},
 		workerMapping: make(map[string]reflect.Type),
@@ -102,19 +114,21 @@ func (w *WorkerConfig) Register(name string, worker Worker) {
 }
 
 func (w *WorkerConfig) Run() {
+	log.Printf(`state=starting worker_count=%d redis=%s/0/%s queues="%s" pid=%d`, w.WorkerCount, w.RedisServer, w.RedisNamespace, w.Queues, pid)
 	w.denormalizeQueues()
 	w.connectRedis()
 
 	for i := 0; i < w.WorkerCount; i++ {
-		go w.worker()
+		go w.worker(workerID(i))
 	}
 
 	go w.scheduler()
 	go w.quitHandler()
 
+	log.Printf(`state=started pid=%d`, pid)
 	for {
 		w.RLock() // don't let quitHandler() stop us in the middle of a job
-		msg, err := redis.Bytes(w.redisQuery("BLPOP", append(w.queueList(), redisTimeout)))
+		msg, err := redis.Values(w.redisQuery("BLPOP", append(w.queueList(), redisTimeout)))
 		if err == redis.ErrNil {
 			continue
 		}
@@ -125,11 +139,12 @@ func (w *WorkerConfig) Run() {
 		}
 
 		job := &Job{}
-		err = job.FromJSON(msg)
+		err = job.FromJSON(msg[1].([]byte))
 		if err != nil {
 			w.handleError(err)
 			continue
 		}
+		job.Queue = string(msg[0].([]byte))
 		w.workQueue <- message{job: job}
 
 		w.RUnlock()
@@ -224,20 +239,26 @@ func (w *WorkerConfig) quitHandler() {
 	signal.Notify(c, syscall.SIGTERM)
 	signal.Notify(c, syscall.SIGQUIT)
 
-	for _ = range c {
+	for sig := range c {
+		log.Printf("state=stopping signal=%s pid=%d", sig, pid)
 		w.Lock()           // wait for the current run loop and scheduler iterations to finish
 		close(w.workQueue) // tell worker goroutines to stop after they finish their current job
 		for i := 0; i < w.WorkerCount; i++ {
 			<-w.doneQueue // wait for workers to finish
 		}
+		log.Printf("state=stopped pid=%d", pid)
 		os.Exit(0)
 	}
 }
 
 func (w *WorkerConfig) connectRedis() {
+	// TODO: add a mutex for the redis pool
+	if w.redisPool != nil {
+		w.redisPool.Close()
+	}
 	w.redisPool = redis.NewPool(func() (redis.Conn, error) {
 		return redis.Dial("tcp", w.RedisServer)
-	}, maxIdleRedis)
+	}, w.WorkerCount+1)
 }
 
 func (w *WorkerConfig) redisQuery(command string, args ...interface{}) (interface{}, error) {
@@ -246,7 +267,7 @@ func (w *WorkerConfig) redisQuery(command string, args ...interface{}) (interfac
 	return conn.Do(command, args...)
 }
 
-func (w *WorkerConfig) worker() {
+func (w *WorkerConfig) worker(id string) {
 	for msg := range w.workQueue {
 		if msg.die {
 			return
@@ -259,6 +280,8 @@ func (w *WorkerConfig) worker() {
 			w.scheduleRetry(job, err)
 			continue
 		}
+
+		w.logJobStart(job, id)
 
 		// wrap Perform() in a function so that we can recover from panics
 		var err error
@@ -274,6 +297,7 @@ func (w *WorkerConfig) worker() {
 		if err != nil {
 			w.scheduleRetry(job, err)
 		}
+		w.logJobFinish(job, id, err == nil)
 	}
 	w.doneQueue <- true
 }
@@ -291,6 +315,53 @@ func (w *WorkerConfig) scheduleRetry(job *Job, err error) {
 		nextRetry := currentTimeFloat() + retryDelay(job.RetryCount)
 
 		w.redisQuery("ZADD", w.nsKey("retry"), fmt.Sprintf("%f", nextRetry), job.JSON())
+	}
+}
+
+type runningJob struct {
+	Queue     string `json:"queue"`
+	Job       *Job   `json:"payload"`
+	Timestamp int64  `json:"run_at"`
+}
+
+// TODO: make a lua script for this
+func (w *WorkerConfig) logJobStart(job *Job, workerID string) {
+	conn := w.redisPool.Get()
+	defer conn.Close()
+
+	conn.Send("MULTI")
+	conn.Send("SADD", w.nsKey("workers"), workerID)
+	conn.Send("SETEX", w.nsKey("worker:"+workerID+":started"), keyExpiry, time.Now().UTC().String())
+	payload := &runningJob{job.Queue, job, time.Now().Unix()}
+	json, _ := json.Marshal(payload)
+	conn.Send("SETEX", w.nsKey("worker:"+workerID), keyExpiry, json)
+	_, err := conn.Do("EXEC")
+	if err != nil {
+		w.handleError(err)
+	}
+
+	job.StartTime = time.Now()
+	log.Printf("event=job_start job_id=%s job_type=%s queue=%s worker_id=%s pid=%d", job.ID, job.Type, job.Queue, workerID, pid)
+}
+
+// TODO: make a lua script for this
+func (w *WorkerConfig) logJobFinish(job *Job, workerID string, success bool) {
+	log.Printf("event=job_finish job_id=%s job_type=%s queue=%s duration=%v success=%t worker_id=%s pid=%d", job.ID, job.Type, job.Queue, time.Since(job.StartTime), success, workerID, pid)
+
+	conn := w.redisPool.Get()
+	defer conn.Close()
+
+	conn.Send("MULTI")
+	conn.Send("SREM", w.nsKey("workers"), workerID)
+	conn.Send("DEL", w.nsKey("worker:"+workerID+":started"))
+	conn.Send("DEL", w.nsKey("worker:"+workerID))
+	conn.Send("INCR", w.nsKey("stat:processed"))
+	if !success {
+		conn.Send("INCR", w.nsKey("stat:failed"))
+	}
+	_, err := conn.Do("EXEC")
+	if err != nil {
+		w.handleError(err)
 	}
 }
 
@@ -315,4 +386,13 @@ func panicToError(err interface{}) error {
 		return fmt.Errorf(str)
 	}
 	return err.(error)
+}
+
+var (
+	pid         = os.Getpid()
+	hostname, _ = os.Hostname()
+)
+
+func workerID(i int) string {
+	return fmt.Sprintf("%s:%d-%d", hostname, pid, i)
 }
