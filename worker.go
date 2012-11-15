@@ -88,7 +88,7 @@ type WorkerConfig struct {
 	Queues         QueueConfig
 	WorkerCount    int
 	PollInterval   int
-	ReportError    func(error, *Job)
+	ReportError    func(error, *Job) // TODO: pass in a stack trace for context
 
 	workerMapping map[string]reflect.Type
 	randomQueues  []string
@@ -179,7 +179,7 @@ func (w *WorkerConfig) queueList() []interface{} {
 }
 
 func (w *WorkerConfig) handleError(err error) {
-	// TODO: log message to stdout
+	log.Printf(`event=error error_type=%T error_message="%s" pid=%d`, err, err, pid)
 	w.ReportError(err, nil)
 }
 
@@ -306,6 +306,7 @@ func (w *WorkerConfig) scheduleRetry(job *Job, err error) {
 	w.ReportError(err, job)
 
 	job.RetryCount += 1
+	log.Printf(`event=job_error job_id=%s job_type=%s queue=%s retries=%d max_retries=%d error_type=%T error_message="%s" pid=%d`, job.ID, job.Type, job.Queue, job.RetryCount, job.MaxRetries, err, err, pid)
 
 	if job.RetryCount < job.MaxRetries {
 		job.ErrorType = fmt.Sprintf("%T", err)
