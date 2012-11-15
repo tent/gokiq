@@ -57,6 +57,9 @@ func (c *ClientConfig) QueueJobWithConfig(name string, config JobConfig, args ..
 }
 
 func (c *ClientConfig) queueJob(name string, config JobConfig, args []interface{}) error {
+	if args == nil {
+		args = make([]interface{}, 0) // json encodes nil slices as null
+	}
 	job := &Job{
 		Type:  name,
 		Args:  args,
@@ -68,11 +71,10 @@ func (c *ClientConfig) queueJob(name string, config JobConfig, args []interface{
 		return err
 	}
 
-	queueKey := c.nsKey("queue:" + config.Queue)
 	conn := c.redisPool.Get()
 	defer conn.Close()
-	conn.Send("SADD", c.nsKey("queues"), queueKey)
-	_, err = conn.Do("RPUSH", queueKey, json)
+	conn.Send("SADD", c.nsKey("queues"), config.Queue)
+	_, err = conn.Do("RPUSH", c.nsKey("queue:"+config.Queue), json)
 
 	return err
 }

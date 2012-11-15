@@ -22,13 +22,13 @@ type Job struct {
 	Queue string        `json:"queue,omitempty"`
 	ID    string        `json:"jid"`
 
-	Retry      interface{} `json:"retry"` // can be int (number of retries) or bool (true means default)
-	MaxRetries int         `json:"-"`
-	RetryCount int         `json:"retry_count,omitempty"`
-	RetriedAt  int         `json:"retried_at,omitempty"`
+	Retry interface{} `json:"retry"` // can be int (number of retries) or bool (true means default)
 
+	MaxRetries   int    `json:"-"`
+	RetryCount   int    `json:"retry_count"`
 	ErrorMessage string `json:"error_message,omitempty"`
 	ErrorType    string `json:"error_class,omitempty"`
+	RetriedAt    string `json:"retried_at,omitempty"`
 	FailedAt     string `json:"failed_at,omitempty"`
 
 	StartTime time.Time `json:"-"`
@@ -303,13 +303,21 @@ func (w *WorkerConfig) worker(id string) {
 func (w *WorkerConfig) scheduleRetry(job *Job, err error) {
 	w.ReportError(err, job)
 
-	job.RetryCount += 1
 	log.Printf(`event=job_error job_id=%s job_type=%s queue=%s retries=%d max_retries=%d error_type=%T error_message="%s" pid=%d`, job.ID, job.Type, job.Queue, job.RetryCount, job.MaxRetries, err, err, pid)
 
 	if job.RetryCount < job.MaxRetries {
 		job.ErrorType = fmt.Sprintf("%T", err)
 		job.ErrorMessage = err.Error()
-		job.FailedAt = time.Now().UTC().Format(TimestampFormat)
+
+		now := time.Now().UTC().Format(TimestampFormat)
+		if job.FailedAt == "" {
+			job.FailedAt = now
+		} else {
+			job.RetryCount += 1
+		}
+		if job.RetryCount > 0 {
+			job.RetriedAt = now
+		}
 
 		nextRetry := currentTimeFloat() + retryDelay(job.RetryCount)
 
