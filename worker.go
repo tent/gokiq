@@ -63,6 +63,8 @@ const (
 	redisTimeout        = 1
 	defaultMaxRetries   = 25
 	defaultPollInterval = 5
+	defaultWorkerCount  = 25
+	defaultRedisServer  = "127.0.0.1:6379"
 	keyExpiry           = 86400 // one day
 )
 
@@ -100,8 +102,10 @@ type WorkerConfig struct {
 
 func NewWorkerConfig() *WorkerConfig {
 	return &WorkerConfig{
-		RedisServer:   "127.0.0.1:6379",
+		RedisServer:   defaultRedisServer,
 		PollInterval:  defaultPollInterval,
+		WorkerCount:   defaultWorkerCount,
+		Queues:        QueueConfig{"default": 1},
 		ReportError:   func(error, *Job) {},
 		workerMapping: make(map[string]reflect.Type),
 		workQueue:     make(chan message),
@@ -110,7 +114,7 @@ func NewWorkerConfig() *WorkerConfig {
 }
 
 func (w *WorkerConfig) Register(name string, worker Worker) {
-	w.workerMapping[name] = reflect.Indirect(reflect.ValueOf(worker)).Type()
+	w.workerMapping[name] = workerType(worker)
 }
 
 func (w *WorkerConfig) Run() {
@@ -128,7 +132,7 @@ func (w *WorkerConfig) Run() {
 	log.Printf(`state=started pid=%d`, pid)
 	for {
 		w.RLock() // don't let quitHandler() stop us in the middle of a job
-		msg, err := redis.Values(w.redisQuery("BLPOP", append(w.queueList(), redisTimeout)))
+		msg, err := redis.Values(w.redisQuery("BLPOP", append(w.queueList(), redisTimeout)...))
 		if err == redis.ErrNil {
 			continue
 		}
@@ -144,7 +148,7 @@ func (w *WorkerConfig) Run() {
 			w.handleError(err)
 			continue
 		}
-		job.Queue = string(msg[0].([]byte))
+		job.Queue = string(msg[0].([]byte)[len(w.nsKey("queue:")):])
 		w.workQueue <- message{job: job}
 
 		w.RUnlock()
@@ -197,21 +201,15 @@ func (w *WorkerConfig) scheduler() {
 			conn.Send("ZRANGEBYSCORE", set, "-inf", now)
 			conn.Send("ZREMRANGEBYSCORE", set, "-inf", now)
 			res, err := redis.Values(conn.Do("EXEC"))
-			if err == redis.ErrNil { // TODO: check if this is possible
-				continue
-			}
 			if err != nil {
 				w.handleError(err)
 				continue
 			}
 
-			messages, _ := redis.Values(res, nil)
-			if messages == nil { // TODO: check if this is possible
-				continue
-			}
-
-			for _, msg := range messages {
-				parsedMsg := &struct{ queue string }{}
+			for _, msg := range res[0].([]interface{}) {
+				parsedMsg := &struct {
+					Queue string `json:"queue"`
+				}{}
 				msgBytes := msg.([]byte)
 				err := json.Unmarshal(msgBytes, parsedMsg)
 				if err != nil {
@@ -219,8 +217,8 @@ func (w *WorkerConfig) scheduler() {
 					continue
 				}
 				conn.Send("MULTI")
-				conn.Send("SADD", w.nsKey("queues"), parsedMsg.queue)
-				conn.Send("RPUSH", w.nsKey("queue:"+parsedMsg.queue), msgBytes)
+				conn.Send("SADD", w.nsKey("queues"), parsedMsg.Queue)
+				conn.Send("RPUSH", w.nsKey("queue:"+parsedMsg.Queue), msgBytes)
 				_, err = conn.Do("EXEC")
 				if err != nil {
 					w.handleError(err)
@@ -396,4 +394,8 @@ var (
 
 func workerID(i int) string {
 	return fmt.Sprintf("%s:%d-%d", hostname, pid, i)
+}
+
+func workerType(worker Worker) reflect.Type {
+	return reflect.Indirect(reflect.ValueOf(worker)).Type()
 }
