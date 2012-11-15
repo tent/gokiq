@@ -18,8 +18,9 @@ type ClientConfig struct {
 	RedisNamespace string
 	RedisMaxIdle   int
 
-	redisPool  *redis.Pool
-	jobMapping jobMap
+	redisPool   *redis.Pool
+	jobMapping  jobMap
+	knownQueues map[string]bool
 }
 
 func NewClientConfig() *ClientConfig {
@@ -27,11 +28,13 @@ func NewClientConfig() *ClientConfig {
 		RedisServer:  defaultRedisServer,
 		RedisMaxIdle: 1,
 		jobMapping:   make(jobMap),
+		knownQueues:  make(map[string]bool),
 	}
 }
 
 func (c *ClientConfig) Register(name string, worker Worker, queue string, retries int) {
 	c.jobMapping[workerType(worker)] = JobConfig{queue, retries, name}
+	c.trackQueue(queue)
 }
 
 func (c *ClientConfig) Connect() {
@@ -42,6 +45,13 @@ func (c *ClientConfig) Connect() {
 	c.redisPool = redis.NewPool(func() (redis.Conn, error) {
 		return redis.Dial("tcp", c.RedisServer)
 	}, c.RedisMaxIdle)
+
+	queues := make([]interface{}, 1, len(c.knownQueues)+1)
+	queues[0] = c.nsKey("queues")
+	for queue := range c.knownQueues {
+		queues = append(queues, queue)
+	}
+	c.redisQuery("SADD", queues...)
 }
 
 func (c *ClientConfig) QueueJob(worker Worker, args ...interface{}) error {
@@ -53,6 +63,7 @@ func (c *ClientConfig) QueueJob(worker Worker, args ...interface{}) error {
 }
 
 func (c *ClientConfig) QueueJobWithConfig(name string, config JobConfig, args ...interface{}) error {
+	c.trackQueue(config.Queue)
 	return c.queueJob(name, config, args)
 }
 
@@ -71,12 +82,24 @@ func (c *ClientConfig) queueJob(name string, config JobConfig, args []interface{
 		return err
 	}
 
+	_, err = c.redisQuery("RPUSH", c.nsKey("queue:"+config.Queue), json)
+	return err
+}
+
+func (c *ClientConfig) trackQueue(queue string) {
+	_, known := c.knownQueues[queue]
+	if !known {
+		c.knownQueues[queue] = true
+		if c.redisPool != nil {
+			c.redisQuery("SADD", c.nsKey("queues"), queue)
+		}
+	}
+}
+
+func (c *ClientConfig) redisQuery(command string, args ...interface{}) (interface{}, error) {
 	conn := c.redisPool.Get()
 	defer conn.Close()
-	conn.Send("SADD", c.nsKey("queues"), config.Queue)
-	_, err = conn.Do("RPUSH", c.nsKey("queue:"+config.Queue), json)
-
-	return err
+	return conn.Do(command, args...)
 }
 
 func (c *ClientConfig) nsKey(key string) string {

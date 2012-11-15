@@ -19,5 +19,6 @@ func doSomething(i float64) {
 
 func main() {
 	gokiq.Workers.Register("ExampleWorker", &ExampleWorker{})
+	gokiq.Workers.WorkerCount = 200
 	gokiq.Workers.Run()
 }
