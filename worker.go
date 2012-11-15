@@ -274,7 +274,7 @@ func (w *WorkerConfig) worker(id string) {
 		job := msg.job
 		typ, ok := w.workerMapping[msg.job.Type]
 		if !ok {
-			err := fmt.Errorf("Unknown worker type: %s", job.Type)
+			err := UnknownWorkerError{job.Type}
 			w.scheduleRetry(job, err)
 			continue
 		}
@@ -406,4 +406,10 @@ func workerID(i int) string {
 
 func workerType(worker Worker) reflect.Type {
 	return reflect.Indirect(reflect.ValueOf(worker)).Type()
+}
+
+type UnknownWorkerError struct{ Type string }
+
+func (e UnknownWorkerError) Error() string {
+	return "gokiq: Unknown worker type: " + e.Type
 }
