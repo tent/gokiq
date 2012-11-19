@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"reflect"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -321,7 +322,7 @@ func (w *WorkerConfig) scheduleRetry(job *Job, err error) {
 
 		nextRetry := currentTimeFloat() + retryDelay(job.RetryCount)
 
-		w.redisQuery("ZADD", w.nsKey("retry"), fmt.Sprintf("%f", nextRetry), job.JSON())
+		w.redisQuery("ZADD", w.nsKey("retry"), strconv.FormatFloat(nextRetry, 'f', -1, 64), job.JSON())
 	}
 }
 
