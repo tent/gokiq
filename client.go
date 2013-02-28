@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"reflect"
 
 	"github.com/garyburd/redigo/redis"
@@ -111,7 +112,7 @@ func (c *ClientConfig) nsKey(key string) string {
 
 func generateJobID() string {
 	b := make([]byte, 8)
-	rand.Read(b)
+	io.ReadFull(rand.Reader, b)
 	return fmt.Sprintf("%x", b)
 }
 
