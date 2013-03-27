@@ -169,13 +169,13 @@ func (w *WorkerConfig) denormalizeQueues() {
 func (w *WorkerConfig) queueList() []interface{} {
 	size := len(w.Queues)
 	res := make([]interface{}, 0, size)
-	queues := make(map[string]bool, size)
+	queues := make(map[string]struct{}, size)
 
 	indices := rand.Perm(len(w.randomQueues))[:size]
 	for _, i := range indices {
 		queue := w.randomQueues[i]
 		if _, ok := queues[queue]; !ok {
-			queues[queue] = true
+			queues[queue] = struct{}{}
 			res = append(res, queue)
 		}
 	}

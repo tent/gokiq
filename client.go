@@ -21,7 +21,7 @@ type ClientConfig struct {
 
 	redisPool   *redis.Pool
 	jobMapping  jobMap
-	knownQueues map[string]bool
+	knownQueues map[string]struct{}
 }
 
 func NewClientConfig() *ClientConfig {
@@ -29,7 +29,7 @@ func NewClientConfig() *ClientConfig {
 		RedisServer:  defaultRedisServer,
 		RedisMaxIdle: 1,
 		jobMapping:   make(jobMap),
-		knownQueues:  make(map[string]bool),
+		knownQueues:  make(map[string]struct{}),
 	}
 }
 
@@ -90,7 +90,7 @@ func (c *ClientConfig) queueJob(name string, config JobConfig, args []interface{
 func (c *ClientConfig) trackQueue(queue string) {
 	_, known := c.knownQueues[queue]
 	if !known {
-		c.knownQueues[queue] = true
+		c.knownQueues[queue] = struct{}{}
 		if c.redisPool != nil {
 			c.redisQuery("SADD", c.nsKey("queues"), queue)
 		}
