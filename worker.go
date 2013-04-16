@@ -273,7 +273,7 @@ func (w *WorkerConfig) worker(id string) {
 	w.done.Add(1)
 	for msg := range w.workQueue {
 		if msg.die {
-			return
+			break
 		}
 
 		job := msg.job
