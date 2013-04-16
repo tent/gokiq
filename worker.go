@@ -97,7 +97,7 @@ type WorkerConfig struct {
 	randomQueues  []string
 	redisPool     *redis.Pool
 	workQueue     chan message
-	doneQueue     chan bool
+	done          sync.WaitGroup
 	sync.RWMutex  // R is locked by Run() and scheduler(), W is locked by quitHandler() when it receives a signal
 }
 
@@ -110,7 +110,6 @@ func NewWorkerConfig() *WorkerConfig {
 		ReportError:   func(error, *Job) {},
 		workerMapping: make(map[string]reflect.Type),
 		workQueue:     make(chan message),
-		doneQueue:     make(chan bool),
 	}
 }
 
@@ -247,7 +246,7 @@ func (w *WorkerConfig) quitHandler() {
 		w.Lock()           // wait for the current run loop and scheduler iterations to finish
 		close(w.workQueue) // tell worker goroutines to stop after they finish their current job
 		for i := 0; i < w.WorkerCount; i++ {
-			<-w.doneQueue // wait for workers to finish
+			w.done.Wait()
 		}
 		log.Printf("state=stopped pid=%d", pid)
 		os.Exit(0)
@@ -271,6 +270,7 @@ func (w *WorkerConfig) redisQuery(command string, args ...interface{}) (interfac
 }
 
 func (w *WorkerConfig) worker(id string) {
+	w.done.Add(1)
 	for msg := range w.workQueue {
 		if msg.die {
 			return
@@ -302,7 +302,7 @@ func (w *WorkerConfig) worker(id string) {
 		}
 		w.logJobFinish(job, id, err == nil)
 	}
-	w.doneQueue <- true
+	w.done.Done()
 }
 
 func (w *WorkerConfig) scheduleRetry(job *Job, err error) {
