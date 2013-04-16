@@ -126,6 +126,7 @@ func (w *WorkerConfig) Run() {
 	for i := 0; i < w.WorkerCount; i++ {
 		go w.worker(workerID(i))
 	}
+	w.done.Add(w.WorkerCount)
 
 	go w.scheduler()
 	go w.quitHandler()
@@ -271,7 +272,6 @@ func (w *WorkerConfig) redisQuery(command string, args ...interface{}) (interfac
 }
 
 func (w *WorkerConfig) worker(id string) {
-	w.done.Add(1)
 	for msg := range w.workQueue {
 		if msg.die {
 			break
