@@ -61,6 +61,7 @@ type message struct {
 
 const (
 	TimestampFormat     = "2006-01-02 15:04:05 MST"
+	dateFormat          = "2006-01-02"
 	redisTimeout        = 1
 	defaultMaxRetries   = 25
 	defaultPollInterval = 5
@@ -363,13 +364,16 @@ func (w *WorkerConfig) logJobFinish(job *Job, workerID string, success bool) {
 	conn := w.redisPool.Get()
 	defer conn.Close()
 
+	date := time.Now().Format(dateFormat)
 	conn.Send("MULTI")
 	conn.Send("SREM", w.nsKey("workers"), workerID)
 	conn.Send("DEL", w.nsKey("worker:"+workerID+":started"))
 	conn.Send("DEL", w.nsKey("worker:"+workerID))
 	conn.Send("INCR", w.nsKey("stat:processed"))
+	conn.Send("INCR", w.nsKey("stat:processed:"+date))
 	if !success {
 		conn.Send("INCR", w.nsKey("stat:failed"))
+		conn.Send("INCR", w.nsKey("stat:failed:"+date))
 	}
 	_, err := conn.Do("EXEC")
 	if err != nil {
