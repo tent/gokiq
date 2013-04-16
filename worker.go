@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -65,6 +66,7 @@ const (
 	redisTimeout        = 1
 	defaultMaxRetries   = 25
 	defaultPollInterval = 5 * time.Second
+	defaultStopTimeout  = 8 * time.Second
 	defaultWorkerCount  = 25
 	defaultRedisServer  = "127.0.0.1:6379"
 	keyExpiry           = 86400 // one day
@@ -92,7 +94,12 @@ type WorkerConfig struct {
 	Queues         QueueConfig
 	WorkerCount    int
 	PollInterval   time.Duration
+	StopTimeout    time.Duration
 	ReportError    func(error, *Job) // TODO: pass in a stack trace for context
+
+	// worker id -> job mapping
+	work    map[string]*Job
+	workMtx sync.Mutex
 
 	workerMapping map[string]reflect.Type
 	randomQueues  []string
@@ -106,11 +113,13 @@ func NewWorkerConfig() *WorkerConfig {
 	return &WorkerConfig{
 		RedisServer:   defaultRedisServer,
 		PollInterval:  defaultPollInterval,
+		StopTimeout:   defaultStopTimeout,
 		WorkerCount:   defaultWorkerCount,
 		Queues:        QueueConfig{"default": 1},
 		ReportError:   func(error, *Job) {},
 		workerMapping: make(map[string]reflect.Type),
 		workQueue:     make(chan message),
+		work:          make(map[string]*Job),
 	}
 }
 
@@ -247,11 +256,59 @@ func (w *WorkerConfig) quitHandler() {
 		log.Printf("state=stopping signal=%s pid=%d", sig, pid)
 		w.Lock()           // wait for the current run loop and scheduler iterations to finish
 		close(w.workQueue) // tell worker goroutines to stop after they finish their current job
-		for i := 0; i < w.WorkerCount; i++ {
+		w.clearWorkerSet()
+		done := make(chan struct{})
+		go func() {
 			w.done.Wait()
+			done <- struct{}{}
+		}()
+		select {
+		case <-done:
+		case <-time.After(w.StopTimeout):
+			log.Printf("state=stop_timeout timeout=%s pid=%d", w.StopTimeout, pid)
+			w.requeueJobs()
 		}
 		log.Printf("state=stopped pid=%d", pid)
 		os.Exit(0)
+	}
+}
+
+func (w *WorkerConfig) clearWorkerSet() {
+	key := w.nsKey("workers")
+	res, _ := redis.Strings(w.redisQuery("SMEMBERS", key))
+	workerIDs := make([]interface{}, 1, w.WorkerCount+1)
+	substr := ":" + strconv.Itoa(pid) + "-"
+	workerIDs[0] = key
+	for _, s := range res {
+		if strings.Contains(s, substr) {
+			workerIDs = append(workerIDs, s)
+		}
+	}
+	if len(workerIDs) > 1 {
+		w.redisQuery("SREM", workerIDs...)
+	}
+}
+
+func (w *WorkerConfig) requeueJobs() {
+	w.workMtx.Lock()
+	jobQueues := make(map[string][]*Job)
+	workers := make(map[*Job]string)
+	for worker, job := range w.work {
+		workers[job] = worker
+		jobQueues[job.Queue] = append(jobQueues[job.Queue], job)
+	}
+	w.workMtx.Unlock()
+
+	for queue, jobs := range jobQueues {
+		jobJSON := make([]interface{}, len(jobs)+1)
+		for i, job := range jobs {
+			jobJSON[i+1] = job.JSON()
+		}
+		jobJSON[0] = w.nsKey("queue:" + queue)
+		_, err := w.redisQuery("RPUSH", jobJSON...)
+		for _, job := range jobs {
+			log.Printf("event=job_requeue job_id=%s job_type=%s queue=%s success=%t worker_id=%s pid=%d", job.ID, job.Type, queue, err == nil, workers[job], pid)
+		}
 	}
 }
 
@@ -285,7 +342,7 @@ func (w *WorkerConfig) worker(id string) {
 			continue
 		}
 
-		w.logJobStart(job, id)
+		w.trackJobStart(job, id)
 
 		// wrap Perform() in a function so that we can recover from panics
 		var err error
@@ -301,7 +358,7 @@ func (w *WorkerConfig) worker(id string) {
 		if err != nil {
 			w.scheduleRetry(job, err)
 		}
-		w.logJobFinish(job, id, err == nil)
+		w.trackJobFinish(job, id, err == nil)
 	}
 	w.done.Done()
 }
@@ -337,10 +394,13 @@ type runningJob struct {
 	Timestamp int64  `json:"run_at"`
 }
 
-// TODO: make a lua script for this
-func (w *WorkerConfig) logJobStart(job *Job, workerID string) {
+func (w *WorkerConfig) trackJobStart(job *Job, workerID string) {
 	conn := w.redisPool.Get()
 	defer conn.Close()
+
+	w.workMtx.Lock()
+	w.work[workerID] = job
+	w.workMtx.Unlock()
 
 	conn.Send("MULTI")
 	conn.Send("SADD", w.nsKey("workers"), workerID)
@@ -357,12 +417,15 @@ func (w *WorkerConfig) logJobStart(job *Job, workerID string) {
 	log.Printf("event=job_start job_id=%s job_type=%s queue=%s worker_id=%s pid=%d", job.ID, job.Type, job.Queue, workerID, pid)
 }
 
-// TODO: make a lua script for this
-func (w *WorkerConfig) logJobFinish(job *Job, workerID string, success bool) {
+func (w *WorkerConfig) trackJobFinish(job *Job, workerID string, success bool) {
 	log.Printf("event=job_finish job_id=%s job_type=%s queue=%s duration=%v success=%t worker_id=%s pid=%d", job.ID, job.Type, job.Queue, time.Since(job.StartTime), success, workerID, pid)
 
 	conn := w.redisPool.Get()
 	defer conn.Close()
+
+	w.workMtx.Lock()
+	delete(w.work, workerID)
+	w.workMtx.Unlock()
 
 	date := time.Now().Format(dateFormat)
 	conn.Send("MULTI")
