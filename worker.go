@@ -64,7 +64,7 @@ const (
 	dateFormat          = "2006-01-02"
 	redisTimeout        = 1
 	defaultMaxRetries   = 25
-	defaultPollInterval = 5
+	defaultPollInterval = 5 * time.Second
 	defaultWorkerCount  = 25
 	defaultRedisServer  = "127.0.0.1:6379"
 	keyExpiry           = 86400 // one day
@@ -91,7 +91,7 @@ type WorkerConfig struct {
 	RedisNamespace string
 	Queues         QueueConfig
 	WorkerCount    int
-	PollInterval   int
+	PollInterval   time.Duration
 	ReportError    func(error, *Job) // TODO: pass in a stack trace for context
 
 	workerMapping map[string]reflect.Type
@@ -197,7 +197,7 @@ func (w *WorkerConfig) handleError(err error) {
 func (w *WorkerConfig) scheduler() {
 	pollSets := []string{w.nsKey("retry"), w.nsKey("schedule")}
 
-	for _ = range time.Tick(time.Duration(w.PollInterval) * time.Second) {
+	for _ = range time.Tick(w.PollInterval) {
 		w.RLock() // don't let quitHandler() stop us in the middle of a run
 		conn := w.redisPool.Get()
 		now := fmt.Sprintf("%f", currentTimeFloat())
