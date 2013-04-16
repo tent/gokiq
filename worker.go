@@ -132,28 +132,32 @@ func (w *WorkerConfig) Run() {
 
 	log.Printf(`state=started pid=%d`, pid)
 	for {
-		w.RLock() // don't let quitHandler() stop us in the middle of a job
-		msg, err := redis.Values(w.redisQuery("BLPOP", append(w.queueList(), redisTimeout)...))
-		if err == redis.ErrNil {
-			continue
-		}
-		if err != nil {
-			w.handleError(err)
-			time.Sleep(redisTimeout * time.Second) // likely a transient redis error, sleep before retrying
-			continue
-		}
-
-		job := &Job{}
-		err = job.FromJSON(msg[1].([]byte))
-		if err != nil {
-			w.handleError(err)
-			continue
-		}
-		job.Queue = string(msg[0].([]byte)[len(w.nsKey("queue:")):])
-		w.workQueue <- message{job: job}
-
-		w.RUnlock()
+		w.run()
 	}
+}
+
+func (w *WorkerConfig) run() {
+	w.RLock() // don't let quitHandler() stop us in the middle of a job
+	defer w.RUnlock()
+
+	msg, err := redis.Values(w.redisQuery("BLPOP", append(w.queueList(), redisTimeout)...))
+	if err == redis.ErrNil {
+		return
+	}
+	if err != nil {
+		w.handleError(err)
+		time.Sleep(redisTimeout * time.Second) // likely a transient redis error, sleep before retrying
+		return
+	}
+
+	job := &Job{}
+	err = job.FromJSON(msg[1].([]byte))
+	if err != nil {
+		w.handleError(err)
+		return
+	}
+	job.Queue = string(msg[0].([]byte)[len(w.nsKey("queue:")):])
+	w.workQueue <- message{job: job}
 }
 
 // create a slice of queues with duplicates using the assigned frequencies
