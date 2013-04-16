@@ -2,6 +2,8 @@ package gokiq
 
 import (
 	"encoding/json"
+	"io/ioutil"
+	"log"
 	"testing"
 
 	"github.com/garyburd/redigo/redis"
@@ -120,4 +122,8 @@ func (s *WorkerSuite) TestJobRedisLogging(c *C) {
 	mg, err := Workers.redisQuery("GET", "worker:test")
 	MaybeFail(c, err)
 	c.Assert(mg, IsNil)
+}
+
+func init() {
+	log.SetOutput(ioutil.Discard)
 }
