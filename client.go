@@ -2,7 +2,6 @@ package gokiq
 
 import (
 	"crypto/rand"
-	"encoding/json"
 	"fmt"
 	"io"
 	"reflect"
@@ -55,35 +54,28 @@ func (c *ClientConfig) Connect() {
 	c.redisQuery("SADD", queues...)
 }
 
-func (c *ClientConfig) QueueJob(worker Worker, args ...interface{}) error {
+func (c *ClientConfig) QueueJob(worker Worker) error {
 	config, ok := c.jobMapping[workerType(worker)]
 	if !ok {
 		panic(fmt.Errorf("gokiq: Unregistered worker type %T", worker))
 	}
-	return c.queueJob(config.name, config, args)
+	return c.queueJob(worker, config)
 }
 
-func (c *ClientConfig) QueueJobWithConfig(name string, config JobConfig, args ...interface{}) error {
+func (c *ClientConfig) QueueJobWithConfig(worker Worker, config JobConfig) error {
 	c.trackQueue(config.Queue)
-	return c.queueJob(name, config, args)
+	return c.queueJob(worker, config)
 }
 
-func (c *ClientConfig) queueJob(name string, config JobConfig, args []interface{}) error {
-	if args == nil {
-		args = make([]interface{}, 0) // json encodes nil slices as null
-	}
+func (c *ClientConfig) queueJob(worker Worker, config JobConfig) error {
 	job := &Job{
-		Type:  name,
-		Args:  args,
+		Type:  config.name,
+		Args:  worker.Args(),
 		Retry: config.MaxRetries,
 		ID:    generateJobID(),
 	}
-	json, err := json.Marshal(job)
-	if err != nil {
-		return err
-	}
 
-	_, err = c.redisQuery("RPUSH", c.nsKey("queue:"+config.Queue), json)
+	_, err := c.redisQuery("RPUSH", c.nsKey("queue:"+config.Queue), job.JSON())
 	return err
 }
 

@@ -3,18 +3,22 @@ package main
 import (
 	"time"
 
-	"github.com/tent/synergizer/gokiq"
+	"github.com/cupcake/gokiq"
 )
 
-type ExampleWorker struct{}
+type ExampleWorker struct {
+	Data []int `json:"args"`
+}
 
-func (w *ExampleWorker) Perform(args []interface{}) error {
-	doSomething(args[0].(float64))
+func (w *ExampleWorker) Args() interface{} { return w.Data }
+
+func (w *ExampleWorker) Perform() error {
+	doSomething(w.Data[0])
 	time.Sleep(100 * time.Millisecond)
 	return nil
 }
 
-func doSomething(i float64) {
+func doSomething(i int) {
 }
 
 func main() {

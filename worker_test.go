@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"log"
 	"testing"
+	"time"
 
 	"github.com/garyburd/redigo/redis"
 	. "launchpad.net/gocheck"
@@ -17,14 +18,20 @@ type WorkerSuite struct{}
 
 var _ = Suite(&WorkerSuite{})
 
+var workChan = make(chan struct{})
+
 type TestWorker struct {
-	Foo string
+	Data []string `json:"args"`
 }
 
-func (w *TestWorker) Perform(args []interface{}) error {
-	args[0].(chan bool) <- args[1].(bool)
+func (w *TestWorker) Perform() error {
+	if w.Data[0] == "foo" {
+		workChan <- struct{}{}
+	}
 	return nil
 }
+
+func (w *TestWorker) Args() interface{} { return w.Args }
 
 func MaybeFail(c *C, err error) {
 	if err != nil {
@@ -39,22 +46,24 @@ func (s *WorkerSuite) SetUpSuite(c *C) {
 }
 
 func (s *WorkerSuite) TestWorkerLoop(c *C) {
-	testChan := make(chan bool)
-
 	go Workers.worker("a")
 
 	job := &Job{
 		Type:  "TestWorker",
-		Args:  []interface{}{testChan, true},
+		Args:  []interface{}{"foo"},
 		Queue: "default",
 		ID:    "123",
 		Retry: false,
 	}
+	job.data = job.JSON()
 
 	Workers.workQueue <- message{job: job}
 
-	res := <-testChan
-	c.Assert(res, Equals, true)
+	select {
+	case <-workChan:
+	case <-time.After(time.Second):
+		c.Error("assertion timeout")
+	}
 }
 
 var RetryParseTests = []struct {
@@ -88,7 +97,7 @@ func (s *WorkerSuite) TestJobRedisLogging(c *C) {
 	_, err := Workers.redisQuery("FLUSHDB")
 	MaybeFail(c, err)
 
-	Workers.logJobStart(job, "test")
+	Workers.trackJobStart(job, "test")
 
 	isMember, err := redis.Bool(Workers.redisQuery("SISMEMBER", "workers", "test"))
 	MaybeFail(c, err)
@@ -109,7 +118,7 @@ func (s *WorkerSuite) TestJobRedisLogging(c *C) {
 	c.Assert(jobMsg.Job.ID, Equals, "123")
 	c.Assert(jobMsg.Timestamp, Not(Equals), 0)
 
-	Workers.logJobFinish(job, "test", false)
+	Workers.trackJobFinish(job, "test", false)
 
 	isMember, err = redis.Bool(Workers.redisQuery("SISMEMBER", "workers", "test"))
 	MaybeFail(c, err)
