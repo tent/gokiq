@@ -17,6 +17,7 @@ type ClientConfig struct {
 	RedisServer    string
 	RedisNamespace string
 	RedisMaxIdle   int
+	Fake           bool
 
 	redisPool   *redis.Pool
 	jobMapping  jobMap
@@ -73,6 +74,9 @@ func (c *ClientConfig) queueJob(worker Worker, config JobConfig) error {
 		Args:  worker.Args(),
 		Retry: config.MaxRetries,
 		ID:    generateJobID(),
+	}
+	if c.Fake {
+		return worker.Perform()
 	}
 
 	_, err := c.redisQuery("RPUSH", c.nsKey("queue:"+config.Queue), job.JSON())
