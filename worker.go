@@ -95,7 +95,7 @@ type WorkerConfig struct {
 	WorkerCount    int
 	PollInterval   time.Duration
 	StopTimeout    time.Duration
-	ReportError    func(error, *Job) // TODO: pass in a stack trace for context
+	ReportError    func(error, *Job)
 
 	// worker id -> job mapping
 	work    map[string]*Job
@@ -349,7 +349,6 @@ func (w *WorkerConfig) worker(id string) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					// TODO: log stack trace
 					err = panicToError(r)
 				}
 			}()
