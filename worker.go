@@ -458,7 +458,7 @@ func (w *WorkerConfig) nsKey(key string) string {
 
 // formula from Sidekiq (originally from delayed_job)
 func retryDelay(count int) float64 {
-	return math.Pow(float64(count), 4) + 15 + (float64(rand.Intn(30)) * (float64(count) + 1))
+	return math.Pow(float64(count), 4) + 15 + float64(rand.Intn(30)*(count+1))
 }
 
 func currentTimeFloat() float64 {
