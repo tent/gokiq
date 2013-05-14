@@ -252,25 +252,25 @@ func (w *WorkerConfig) quitHandler() {
 	signal.Notify(c, syscall.SIGTERM)
 	signal.Notify(c, syscall.SIGQUIT)
 
-	for sig := range c {
-		log.Printf("state=stopping signal=%s pid=%d", sig, pid)
-		w.Lock()           // wait for the current run loop and scheduler iterations to finish
-		close(w.workQueue) // tell worker goroutines to stop after they finish their current job
-		w.clearWorkerSet()
-		done := make(chan struct{})
-		go func() {
-			w.done.Wait()
-			done <- struct{}{}
-		}()
-		select {
-		case <-done:
-		case <-time.After(w.StopTimeout):
-			log.Printf("state=stop_timeout timeout=%s pid=%d", w.StopTimeout, pid)
-			w.requeueJobs()
-		}
-		log.Printf("state=stopped pid=%d", pid)
-		os.Exit(0)
+	sig := <-c
+	signal.Stop(c)
+	log.Printf("state=stopping signal=%s pid=%d", sig, pid)
+	w.Lock()           // wait for the current run loop and scheduler iterations to finish
+	close(w.workQueue) // tell worker goroutines to stop after they finish their current job
+	w.clearWorkerSet()
+	done := make(chan struct{})
+	go func() {
+		w.done.Wait()
+		done <- struct{}{}
+	}()
+	select {
+	case <-done:
+	case <-time.After(w.StopTimeout):
+		log.Printf("state=stop_timeout timeout=%s pid=%d", w.StopTimeout, pid)
+		w.requeueJobs()
 	}
+	log.Printf("state=stopped pid=%d", pid)
+	os.Exit(0)
 }
 
 func (w *WorkerConfig) clearWorkerSet() {
