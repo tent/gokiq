@@ -8,12 +8,10 @@ import (
 )
 
 type ExampleWorker struct {
-	Data []int `json:"args"`
+	Data []int
 }
 
 func (w *ExampleWorker) Perform() error { return nil }
-
-func (w *ExampleWorker) Args() interface{} { return w.Data }
 
 func main() {
 	gokiq.Client.Register("ExampleWorker", &ExampleWorker{}, "default", 5)

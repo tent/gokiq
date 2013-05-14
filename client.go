@@ -2,6 +2,7 @@ package gokiq
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"io"
 	"reflect"
@@ -69,9 +70,14 @@ func (c *ClientConfig) QueueJobWithConfig(worker Worker, config JobConfig) error
 }
 
 func (c *ClientConfig) queueJob(worker Worker, config JobConfig) error {
+	data, err := json.Marshal(worker)
+	if err != nil {
+		return err
+	}
+	args := json.RawMessage(data)
 	job := &Job{
 		Type:  config.name,
-		Args:  worker.Args(),
+		Args:  &args,
 		Retry: config.MaxRetries,
 		ID:    generateJobID(),
 	}
@@ -79,7 +85,7 @@ func (c *ClientConfig) queueJob(worker Worker, config JobConfig) error {
 		return worker.Perform()
 	}
 
-	_, err := c.redisQuery("RPUSH", c.nsKey("queue:"+config.Queue), job.JSON())
+	_, err = c.redisQuery("RPUSH", c.nsKey("queue:"+config.Queue), job.JSON())
 	return err
 }
 

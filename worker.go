@@ -19,10 +19,10 @@ import (
 )
 
 type Job struct {
-	Type  string      `json:"class"`
-	Args  interface{} `json:"args"`
-	Queue string      `json:"queue,omitempty"`
-	ID    string      `json:"jid"`
+	Type  string           `json:"class"`
+	Args  *json.RawMessage `json:"args"`
+	Queue string           `json:"queue,omitempty"`
+	ID    string           `json:"jid"`
 
 	Retry interface{} `json:"retry"` // can be int (number of retries) or bool (true means default)
 
@@ -34,8 +34,6 @@ type Job struct {
 	FailedAt     string `json:"failed_at,omitempty"`
 
 	StartTime time.Time `json:"-"`
-
-	data []byte // JSON job data, unmarshalled into worker struct
 }
 
 func (job *Job) FromJSON(data []byte) error {
@@ -43,7 +41,6 @@ func (job *Job) FromJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
-	job.data = data
 	if max, ok := job.Retry.(float64); ok {
 		job.MaxRetries = int(max)
 	} else if r, ok := job.Retry.(bool); ok && !r {
@@ -87,7 +84,6 @@ func (q QueueConfig) String() string {
 
 type Worker interface {
 	Perform() error
-	Args() interface{}
 }
 
 var Workers = NewWorkerConfig()
@@ -306,7 +302,7 @@ func (w *WorkerConfig) requeueJobs() {
 	for queue, jobs := range jobQueues {
 		jobJSON := make([]interface{}, len(jobs)+1)
 		for i, job := range jobs {
-			jobJSON[i+1] = job.data
+			jobJSON[i+1] = job.JSON()
 		}
 		jobJSON[0] = w.nsKey("queue:" + queue)
 		_, err := w.redisQuery("RPUSH", jobJSON...)
@@ -358,11 +354,10 @@ func (w *WorkerConfig) worker(id string) {
 				}
 			}()
 			worker := reflect.New(typ).Interface().(Worker)
-			err = json.Unmarshal(job.data, worker)
+			err = json.Unmarshal(*job.Args, worker)
 			if err != nil {
 				return
 			}
-			job.Args = worker.Args()
 			err = worker.Perform()
 		}()
 		if err != nil {

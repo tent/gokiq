@@ -7,10 +7,8 @@ import (
 )
 
 type ExampleWorker struct {
-	Data []int `json:"args"`
+	Data []int
 }
-
-func (w *ExampleWorker) Args() interface{} { return w.Data }
 
 func (w *ExampleWorker) Perform() error {
 	doSomething(w.Data[0])
