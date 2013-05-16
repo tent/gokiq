@@ -34,7 +34,13 @@ func NewClientConfig() *ClientConfig {
 	}
 }
 
-func (c *ClientConfig) Register(name string, worker Worker, queue string, retries int) {
+func (c *ClientConfig) Register(worker Worker, queue string, retries int) {
+	t := workerType(worker)
+	c.jobMapping[t] = JobConfig{queue, retries, t.Name()}
+	c.trackQueue(queue)
+}
+
+func (c *ClientConfig) RegisterName(name string, worker Worker, queue string, retries int) {
 	c.jobMapping[workerType(worker)] = JobConfig{queue, retries, name}
 	c.trackQueue(queue)
 }

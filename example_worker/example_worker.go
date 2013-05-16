@@ -20,7 +20,7 @@ func doSomething(i int) {
 }
 
 func main() {
-	gokiq.Workers.Register("ExampleWorker", &ExampleWorker{})
+	gokiq.Workers.Register(&ExampleWorker{})
 	gokiq.Workers.WorkerCount = 200
 	gokiq.Workers.Run()
 }

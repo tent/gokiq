@@ -14,7 +14,7 @@ type ExampleWorker struct {
 func (w *ExampleWorker) Perform() error { return nil }
 
 func main() {
-	gokiq.Client.Register("ExampleWorker", &ExampleWorker{}, "default", 5)
+	gokiq.Client.Register(&ExampleWorker{}, "default", 5)
 	gokiq.Client.Connect()
 
 	fmt.Println("Queuing a broken job...")

@@ -123,7 +123,12 @@ func NewWorkerConfig() *WorkerConfig {
 	}
 }
 
-func (w *WorkerConfig) Register(name string, worker Worker) {
+func (w *WorkerConfig) Register(worker Worker) {
+	t := workerType(worker)
+	w.workerMapping[t.Name()] = t
+}
+
+func (w *WorkerConfig) RegisterName(name string, worker Worker) {
 	w.workerMapping[name] = workerType(worker)
 }
 
