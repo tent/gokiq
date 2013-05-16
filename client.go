@@ -70,7 +70,7 @@ func (c *ClientConfig) QueueJob(worker Worker) error {
 	return c.queueJob(worker, config)
 }
 
-func (c *ClientConfig) QueueJobWithConfig(worker Worker, config JobConfig) error {
+func (c *ClientConfig) QueueJobConfig(worker Worker, config JobConfig) error {
 	c.trackQueue(config.Queue)
 	return c.queueJob(worker, config)
 }
