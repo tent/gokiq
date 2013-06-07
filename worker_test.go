@@ -41,21 +41,21 @@ func MaybeFail(c *C, err error) {
 }
 
 func (s *WorkerSuite) SetUpSuite(c *C) {
-	Workers.Register("TestWorker", &TestWorker{})
+	Workers.Register(&TestWorker{})
 	Workers.connectRedis()
 }
 
 func (s *WorkerSuite) TestWorkerLoop(c *C) {
 	go Workers.worker("a")
 
+	data := json.RawMessage([]byte(`{"args":["foo"]}`))
 	job := &Job{
 		Type:  "TestWorker",
-		Args:  []interface{}{"foo"},
+		Args:  &data,
 		Queue: "default",
 		ID:    "123",
 		Retry: false,
 	}
-	job.data = job.JSON()
 
 	Workers.workQueue <- message{job: job}
 
@@ -88,7 +88,6 @@ func (s *WorkerSuite) TestJobRetryParsing(c *C) {
 func (s *WorkerSuite) TestJobRedisLogging(c *C) {
 	job := &Job{
 		Type:  "TestWorker",
-		Args:  []interface{}{"a"},
 		Queue: "default",
 		ID:    "123",
 		Retry: true,
