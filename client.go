@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"sync"
+	"time"
 
 	"github.com/garyburd/redigo/redis"
 )
@@ -23,6 +25,7 @@ type ClientConfig struct {
 	redisPool   *redis.Pool
 	jobMapping  jobMap
 	knownQueues map[string]struct{}
+	mtx         sync.Mutex
 }
 
 func NewClientConfig() *ClientConfig {
@@ -36,12 +39,12 @@ func NewClientConfig() *ClientConfig {
 
 func (c *ClientConfig) Register(worker Worker, queue string, retries int) {
 	t := workerType(worker)
-	c.jobMapping[t] = JobConfig{queue, retries, t.Name()}
+	c.jobMapping[t] = JobConfig{Queue: queue, MaxRetries: retries, Name: t.Name()}
 	c.trackQueue(queue)
 }
 
 func (c *ClientConfig) RegisterName(name string, worker Worker, queue string, retries int) {
-	c.jobMapping[workerType(worker)] = JobConfig{queue, retries, name}
+	c.jobMapping[workerType(worker)] = JobConfig{Queue: queue, MaxRetries: retries, Name: name}
 	c.trackQueue(queue)
 }
 
@@ -71,6 +74,14 @@ func (c *ClientConfig) QueueJob(worker Worker) error {
 }
 
 func (c *ClientConfig) QueueJobConfig(worker Worker, config JobConfig) error {
+	if baseConfig, ok := c.jobMapping[workerType(worker)]; ok {
+		if config.Name == "" {
+			config.Name = baseConfig.Name
+		}
+		if config.Queue == "" {
+			config.Queue = baseConfig.Queue
+		}
+	}
 	c.trackQueue(config.Queue)
 	return c.queueJob(worker, config)
 }
@@ -82,7 +93,7 @@ func (c *ClientConfig) queueJob(worker Worker, config JobConfig) error {
 	}
 	args := json.RawMessage(data)
 	job := &Job{
-		Type:  config.name,
+		Type:  config.Name,
 		Args:  &args,
 		Retry: config.MaxRetries,
 		ID:    generateJobID(),
@@ -91,18 +102,24 @@ func (c *ClientConfig) queueJob(worker Worker, config JobConfig) error {
 		return worker.Perform()
 	}
 
-	_, err = c.redisQuery("RPUSH", c.nsKey("queue:"+config.Queue), job.JSON())
+	if config.At != nil {
+		job.Queue = config.Queue
+		_, err = c.redisQuery("ZADD", c.nsKey("schedule"), timeFloat(*config.At), job.JSON())
+	} else {
+		_, err = c.redisQuery("RPUSH", c.nsKey("queue:"+config.Queue), job.JSON())
+	}
 	return err
 }
 
 func (c *ClientConfig) trackQueue(queue string) {
-	_, known := c.knownQueues[queue]
-	if !known {
+	c.mtx.Lock()
+	if _, ok := c.knownQueues[queue]; !ok {
 		c.knownQueues[queue] = struct{}{}
 		if c.redisPool != nil {
 			c.redisQuery("SADD", c.nsKey("queues"), queue)
 		}
 	}
+	c.mtx.Unlock()
 }
 
 func (c *ClientConfig) redisQuery(command string, args ...interface{}) (interface{}, error) {
@@ -125,8 +142,8 @@ func generateJobID() string {
 }
 
 type JobConfig struct {
+	Name       string
 	Queue      string
 	MaxRetries int
-
-	name string
+	At         *time.Time
 }

@@ -215,7 +215,7 @@ func (w *WorkerConfig) scheduler() {
 	for _ = range time.Tick(w.PollInterval) {
 		w.RLock() // don't let quitHandler() stop us in the middle of a run
 		conn := w.redisPool.Get()
-		now := fmt.Sprintf("%f", currentTimeFloat())
+		now := fmt.Sprintf("%f", timeFloat(time.Now()))
 		for _, set := range pollSets {
 			conn.Send("MULTI")
 			conn.Send("ZRANGEBYSCORE", set, "-inf", now)
@@ -236,11 +236,7 @@ func (w *WorkerConfig) scheduler() {
 					w.handleError(err)
 					continue
 				}
-				conn.Send("MULTI")
-				conn.Send("SADD", w.nsKey("queues"), parsedMsg.Queue)
-				conn.Send("RPUSH", w.nsKey("queue:"+parsedMsg.Queue), msgBytes)
-				_, err = conn.Do("EXEC")
-				if err != nil {
+				if _, err = conn.Do("RPUSH", w.nsKey("queue:"+parsedMsg.Queue), msgBytes); err != nil {
 					w.handleError(err)
 				}
 			}
@@ -391,7 +387,7 @@ func (w *WorkerConfig) scheduleRetry(job *Job, err error) {
 		job.ErrorType = fmt.Sprintf("%T", err)
 		job.ErrorMessage = err.Error()
 
-		nextRetry := currentTimeFloat() + retryDelay(job.RetryCount)
+		nextRetry := timeFloat(time.Now()) + retryDelay(job.RetryCount)
 
 		w.redisQuery("ZADD", w.nsKey("retry"), strconv.FormatFloat(nextRetry, 'f', -1, 64), job.JSON())
 	}
@@ -465,7 +461,7 @@ func retryDelay(count int) float64 {
 	return math.Pow(float64(count), 4) + 15 + float64(rand.Intn(30)*(count+1))
 }
 
-func currentTimeFloat() float64 {
+func timeFloat(t time.Time) float64 {
 	return float64(time.Now().UnixNano()) / float64(time.Second)
 }
 
