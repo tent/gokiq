@@ -17,23 +17,20 @@ var Client = NewClientConfig()
 type jobMap map[reflect.Type]JobConfig
 
 type ClientConfig struct {
-	RedisServer    string
+	RedisPool      *redis.Pool
 	RedisNamespace string
-	RedisMaxIdle   int
 	Fake           bool
 
-	redisPool   *redis.Pool
 	jobMapping  jobMap
 	knownQueues map[string]struct{}
+	initOnce    sync.Once
 	mtx         sync.Mutex
 }
 
 func NewClientConfig() *ClientConfig {
 	return &ClientConfig{
-		RedisServer:  defaultRedisServer,
-		RedisMaxIdle: 1,
-		jobMapping:   make(jobMap),
-		knownQueues:  make(map[string]struct{}),
+		jobMapping:  make(jobMap),
+		knownQueues: make(map[string]struct{}),
 	}
 }
 
@@ -48,15 +45,12 @@ func (c *ClientConfig) RegisterName(name string, worker Worker, queue string, re
 	c.trackQueue(queue)
 }
 
-func (c *ClientConfig) Connect() {
-	// TODO: add a mutex for the redis pool
-	if c.redisPool != nil {
-		c.redisPool.Close()
+func (c *ClientConfig) init() {
+	if c.RedisPool == nil {
+		c.RedisPool = redis.NewPool(func() (redis.Conn, error) {
+			return redis.Dial("tcp", defaultRedisServer)
+		}, 1)
 	}
-	c.redisPool = redis.NewPool(func() (redis.Conn, error) {
-		return redis.Dial("tcp", c.RedisServer)
-	}, c.RedisMaxIdle)
-
 	queues := make([]interface{}, 1, len(c.knownQueues)+1)
 	queues[0] = c.nsKey("queues")
 	for queue := range c.knownQueues {
@@ -66,6 +60,7 @@ func (c *ClientConfig) Connect() {
 }
 
 func (c *ClientConfig) QueueJob(worker Worker) error {
+	c.initOnce.Do(func() { c.init() })
 	config, ok := c.jobMapping[workerType(worker)]
 	if !ok {
 		panic(fmt.Errorf("gokiq: Unregistered worker type %T", worker))
@@ -74,6 +69,7 @@ func (c *ClientConfig) QueueJob(worker Worker) error {
 }
 
 func (c *ClientConfig) QueueJobConfig(worker Worker, config JobConfig) error {
+	c.initOnce.Do(func() { c.init() })
 	if baseConfig, ok := c.jobMapping[workerType(worker)]; ok {
 		if config.Name == "" {
 			config.Name = baseConfig.Name
@@ -115,7 +111,7 @@ func (c *ClientConfig) trackQueue(queue string) {
 	c.mtx.Lock()
 	if _, ok := c.knownQueues[queue]; !ok {
 		c.knownQueues[queue] = struct{}{}
-		if c.redisPool != nil {
+		if c.RedisPool != nil {
 			c.redisQuery("SADD", c.nsKey("queues"), queue)
 		}
 	}
@@ -123,7 +119,7 @@ func (c *ClientConfig) trackQueue(queue string) {
 }
 
 func (c *ClientConfig) redisQuery(command string, args ...interface{}) (interface{}, error) {
-	conn := c.redisPool.Get()
+	conn := c.RedisPool.Get()
 	defer conn.Close()
 	return conn.Do(command, args...)
 }

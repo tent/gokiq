@@ -15,7 +15,6 @@ func (w *ExampleWorker) Perform() error { return nil }
 
 func main() {
 	gokiq.Client.Register(&ExampleWorker{}, "default", 5)
-	gokiq.Client.Connect()
 
 	fmt.Println("Queuing a broken job...")
 	gokiq.Client.QueueJob(&ExampleWorker{}) // has no arguments, worker will panic due to out of bounds slice access
