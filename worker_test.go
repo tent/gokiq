@@ -42,7 +42,6 @@ func MaybeFail(c *C, err error) {
 
 func (s *WorkerSuite) SetUpSuite(c *C) {
 	Workers.Register(&TestWorker{})
-	Workers.connectRedis()
 }
 
 func (s *WorkerSuite) TestWorkerLoop(c *C) {

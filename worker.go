@@ -89,7 +89,7 @@ type Worker interface {
 var Workers = NewWorkerConfig()
 
 type WorkerConfig struct {
-	RedisServer    string // TODO: allow specifying redis db
+	RedisPool      *redis.Pool
 	RedisNamespace string
 	Queues         QueueConfig
 	WorkerCount    int
@@ -103,15 +103,13 @@ type WorkerConfig struct {
 
 	workerMapping map[string]reflect.Type
 	randomQueues  []string
-	redisPool     *redis.Pool
 	workQueue     chan message
 	done          sync.WaitGroup
 	sync.RWMutex  // R is locked by Run() and scheduler(), W is locked by quitHandler() when it receives a signal
 }
 
 func NewWorkerConfig() *WorkerConfig {
-	return &WorkerConfig{
-		RedisServer:   defaultRedisServer,
+	w := &WorkerConfig{
 		PollInterval:  defaultPollInterval,
 		StopTimeout:   defaultStopTimeout,
 		WorkerCount:   defaultWorkerCount,
@@ -121,6 +119,16 @@ func NewWorkerConfig() *WorkerConfig {
 		workQueue:     make(chan message),
 		work:          make(map[string]*Job),
 	}
+	w.RedisPool = redis.NewPool(func() (redis.Conn, error) {
+		return redis.Dial("tcp", defaultRedisServer)
+	}, w.WorkerCount+1)
+	return w
+}
+
+func Register(worker Worker, queue string, retries int) {
+	Client.Register(worker, queue, retries)
+	Workers.Register(worker)
+	Workers.Queues[queue] = 1
 }
 
 func (w *WorkerConfig) Register(worker Worker) {
@@ -133,9 +141,8 @@ func (w *WorkerConfig) RegisterName(name string, worker Worker) {
 }
 
 func (w *WorkerConfig) Run() {
-	log.Printf(`state=starting worker_count=%d redis=%s/0/%s queues="%s" pid=%d`, w.WorkerCount, w.RedisServer, w.RedisNamespace, w.Queues, pid)
+	log.Printf("state=starting worker_count=%d queues=%q pid=%d", w.WorkerCount, w.Queues, pid)
 	w.denormalizeQueues()
-	w.connectRedis()
 
 	for i := 0; i < w.WorkerCount; i++ {
 		go w.worker(workerID(i))
@@ -214,7 +221,7 @@ func (w *WorkerConfig) scheduler() {
 
 	for _ = range time.Tick(w.PollInterval) {
 		w.RLock() // don't let quitHandler() stop us in the middle of a run
-		conn := w.redisPool.Get()
+		conn := w.RedisPool.Get()
 		now := fmt.Sprintf("%f", timeFloat(time.Now()))
 		for _, set := range pollSets {
 			conn.Send("MULTI")
@@ -313,18 +320,8 @@ func (w *WorkerConfig) requeueJobs() {
 	}
 }
 
-func (w *WorkerConfig) connectRedis() {
-	// TODO: add a mutex for the redis pool
-	if w.redisPool != nil {
-		w.redisPool.Close()
-	}
-	w.redisPool = redis.NewPool(func() (redis.Conn, error) {
-		return redis.Dial("tcp", w.RedisServer)
-	}, w.WorkerCount+1)
-}
-
 func (w *WorkerConfig) redisQuery(command string, args ...interface{}) (interface{}, error) {
-	conn := w.redisPool.Get()
+	conn := w.RedisPool.Get()
 	defer conn.Close()
 	return conn.Do(command, args...)
 }
@@ -381,7 +378,7 @@ func (w *WorkerConfig) scheduleRetry(job *Job, err error) {
 		job.RetriedAt = now
 	}
 
-	log.Printf(`event=job_error job_id=%s job_type=%s queue=%s retries=%d max_retries=%d error_type=%T error_message="%s" pid=%d`, job.ID, job.Type, job.Queue, job.RetryCount, job.MaxRetries, err, err, pid)
+	log.Printf("event=job_error job_id=%s job_type=%s queue=%s retries=%d max_retries=%d error_type=%T error_message=%q pid=%d", job.ID, job.Type, job.Queue, job.RetryCount, job.MaxRetries, err, err, pid)
 
 	if job.RetryCount < job.MaxRetries {
 		job.ErrorType = fmt.Sprintf("%T", err)
@@ -400,7 +397,7 @@ type runningJob struct {
 }
 
 func (w *WorkerConfig) trackJobStart(job *Job, workerID string) {
-	conn := w.redisPool.Get()
+	conn := w.RedisPool.Get()
 	defer conn.Close()
 
 	w.workMtx.Lock()
@@ -425,7 +422,7 @@ func (w *WorkerConfig) trackJobStart(job *Job, workerID string) {
 func (w *WorkerConfig) trackJobFinish(job *Job, workerID string, success bool) {
 	log.Printf("event=job_finish job_id=%s job_type=%s queue=%s duration=%v success=%t worker_id=%s pid=%d", job.ID, job.Type, job.Queue, time.Since(job.StartTime), success, workerID, pid)
 
-	conn := w.redisPool.Get()
+	conn := w.RedisPool.Get()
 	defer conn.Close()
 
 	w.workMtx.Lock()
