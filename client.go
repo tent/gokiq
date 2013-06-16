@@ -98,11 +98,11 @@ func (c *ClientConfig) queueJob(worker Worker, config JobConfig) error {
 		return worker.Perform()
 	}
 
-	if config.At != nil {
-		job.Queue = config.Queue
-		_, err = c.redisQuery("ZADD", c.nsKey("schedule"), timeFloat(*config.At), job.JSON())
-	} else {
+	if config.At.IsZero() {
 		_, err = c.redisQuery("RPUSH", c.nsKey("queue:"+config.Queue), job.JSON())
+	} else {
+		job.Queue = config.Queue
+		_, err = c.redisQuery("ZADD", c.nsKey("schedule"), timeFloat(config.At), job.JSON())
 	}
 	return err
 }
@@ -141,5 +141,5 @@ type JobConfig struct {
 	Name       string
 	Queue      string
 	MaxRetries int
-	At         *time.Time
+	At         time.Time
 }
