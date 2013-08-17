@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -347,7 +348,7 @@ func (w *WorkerConfig) worker(id string) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					err = panicToError(r)
+					err = newPanicError(r)
 				}
 			}()
 			worker := reflect.New(typ).Interface().(Worker)
@@ -462,11 +463,33 @@ func timeFloat(t time.Time) float64 {
 	return float64(time.Now().UnixNano()) / float64(time.Second)
 }
 
-func panicToError(err interface{}) error {
-	if str, ok := err.(string); ok {
-		return fmt.Errorf(str)
+type StackFrame struct {
+	PC   uintptr
+	File string
+	Line int
+}
+
+type PanicError struct {
+	Err   interface{}
+	Stack []StackFrame
+}
+
+func (err *PanicError) Error() string {
+	return fmt.Sprintf("panic: %v", err.Err)
+}
+
+func newPanicError(v interface{}) *PanicError {
+	err := &PanicError{Err: v}
+	for i := 2; ; i++ {
+		var frame StackFrame
+		var ok bool
+		frame.PC, frame.File, frame.Line, ok = runtime.Caller(i)
+		if !ok {
+			break
+		}
+		err.Stack = append(err.Stack, frame)
 	}
-	return err.(error)
+	return err
 }
 
 var (
