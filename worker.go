@@ -87,6 +87,10 @@ type Worker interface {
 	Perform() error
 }
 
+type ReportableErrorChecker interface {
+	ReportableError(error) bool
+}
+
 var Workers = NewWorkerConfig()
 
 type WorkerConfig struct {
@@ -337,7 +341,7 @@ func (w *WorkerConfig) worker(id string) {
 		typ, ok := w.workerMapping[msg.job.Type]
 		if !ok {
 			err := UnknownWorkerError{job.Type}
-			w.scheduleRetry(job, err)
+			w.scheduleRetry(job, err, true)
 			continue
 		}
 
@@ -345,13 +349,14 @@ func (w *WorkerConfig) worker(id string) {
 
 		// wrap Perform() in a function so that we can recover from panics
 		var err error
+		var worker Worker
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
 					err = newPanicError(r)
 				}
 			}()
-			worker := reflect.New(typ).Interface().(Worker)
+			worker = reflect.New(typ).Interface().(Worker)
 			err = json.Unmarshal(*job.Args, worker)
 			if err != nil {
 				return
@@ -359,15 +364,21 @@ func (w *WorkerConfig) worker(id string) {
 			err = worker.Perform()
 		}()
 		if err != nil {
-			w.scheduleRetry(job, err)
+			report := true
+			if checker, ok := worker.(ReportableErrorChecker); ok && job.RetryCount < job.MaxRetries {
+				report = checker.ReportableError(err)
+			}
+			w.scheduleRetry(job, err, report)
 		}
 		w.trackJobFinish(job, id, err == nil)
 	}
 	w.done.Done()
 }
 
-func (w *WorkerConfig) scheduleRetry(job *Job, err error) {
-	w.ReportError(err, job)
+func (w *WorkerConfig) scheduleRetry(job *Job, err error, report bool) {
+	if report {
+		w.ReportError(err, job)
+	}
 
 	now := time.Now().UTC().Format(TimestampFormat)
 	if job.FailedAt == "" {
