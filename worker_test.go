@@ -22,10 +22,11 @@ var workChan = make(chan struct{})
 
 type TestWorker struct {
 	Data []string `json:"args"`
+	Job  *Job     `json:"-"`
 }
 
 func (w *TestWorker) Perform() error {
-	if w.Data[0] == "foo" {
+	if w.Data[0] == "foo" && w.Job != nil {
 		workChan <- struct{}{}
 	}
 	return nil

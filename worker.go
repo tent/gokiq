@@ -331,6 +331,27 @@ func (w *WorkerConfig) redisQuery(command string, args ...interface{}) (interfac
 	return conn.Do(command, args...)
 }
 
+var typeOfJob = reflect.TypeOf((*Job)(nil))
+
+func setJob(worker Worker, job *Job) {
+	val := reflect.ValueOf(worker)
+	if val.Kind() != reflect.Ptr {
+		return
+	}
+	wstruct := val.Elem()
+	if wstruct.Kind() != reflect.Struct {
+		return
+	}
+	wtype := wstruct.Type()
+	for i := 0; i < wtype.NumField(); i++ {
+		field := wtype.Field(i)
+		if field.Type == typeOfJob {
+			wstruct.Field(i).Set(reflect.ValueOf(job))
+			break
+		}
+	}
+}
+
 func (w *WorkerConfig) worker(id string) {
 	for msg := range w.workQueue {
 		if msg.die {
@@ -361,6 +382,7 @@ func (w *WorkerConfig) worker(id string) {
 			if err != nil {
 				return
 			}
+			setJob(worker, job)
 			err = worker.Perform()
 		}()
 		if err != nil {
