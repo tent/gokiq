@@ -387,7 +387,7 @@ func (w *WorkerConfig) worker(id string) {
 		}()
 		if err != nil {
 			report := true
-			if checker, ok := worker.(ReportableErrorChecker); ok && job.RetryCount < job.MaxRetries {
+			if checker, ok := worker.(ReportableErrorChecker); ok {
 				report = checker.ReportableError(err)
 			}
 			w.scheduleRetry(job, err, report)
