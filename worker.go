@@ -493,7 +493,7 @@ func retryDelay(count int) float64 {
 }
 
 func timeFloat(t time.Time) float64 {
-	return float64(time.Now().UnixNano()) / float64(time.Second)
+	return float64(t.UnixNano()) / float64(time.Second)
 }
 
 type StackFrame struct {
