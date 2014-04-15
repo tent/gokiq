@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/codegangsta/inject"
 	"github.com/garyburd/redigo/redis"
 )
 
@@ -83,10 +84,6 @@ func (q QueueConfig) String() string {
 	return str[:len(str)-1]
 }
 
-type Worker interface {
-	Perform() error
-}
-
 type ReportableErrorChecker interface {
 	ReportableError(error) bool
 }
@@ -94,6 +91,7 @@ type ReportableErrorChecker interface {
 var Workers = NewWorkerConfig()
 
 type WorkerConfig struct {
+	inject.Injector
 	RedisPool      *redis.Pool
 	RedisNamespace string
 	Queues         QueueConfig
@@ -115,6 +113,7 @@ type WorkerConfig struct {
 
 func NewWorkerConfig() *WorkerConfig {
 	w := &WorkerConfig{
+		Injector:      inject.New(),
 		PollInterval:  defaultPollInterval,
 		StopTimeout:   defaultStopTimeout,
 		WorkerCount:   defaultWorkerCount,
@@ -130,19 +129,21 @@ func NewWorkerConfig() *WorkerConfig {
 	return w
 }
 
-func Register(worker Worker, queue string, retries int) {
+func Register(worker interface{}, queue string, retries int) {
 	Client.Register(worker, queue, retries)
 	Workers.Register(worker)
 	Workers.Queues[queue] = 1
 }
 
-func (w *WorkerConfig) Register(worker Worker) {
-	t := workerType(worker)
+var typeOfError = reflect.TypeOf((*error)(nil)).Elem()
+
+func (w *WorkerConfig) Register(worker interface{}) {
+	t := validateWorker(worker)
 	w.workerMapping[t.Name()] = t
 }
 
-func (w *WorkerConfig) RegisterName(name string, worker Worker) {
-	w.workerMapping[name] = workerType(worker)
+func (w *WorkerConfig) RegisterName(name string, worker interface{}) {
+	w.workerMapping[name] = validateWorker(worker)
 }
 
 func (w *WorkerConfig) Run() {
@@ -261,9 +262,7 @@ func (w *WorkerConfig) scheduler() {
 // listens for SIGINT, SIGTERM, and SIGQUIT to perform a clean shutdown
 func (w *WorkerConfig) quitHandler() {
 	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt)
-	signal.Notify(c, syscall.SIGTERM)
-	signal.Notify(c, syscall.SIGQUIT)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
 
 	sig := <-c
 	signal.Stop(c)
@@ -331,28 +330,9 @@ func (w *WorkerConfig) redisQuery(command string, args ...interface{}) (interfac
 	return conn.Do(command, args...)
 }
 
-var typeOfJob = reflect.TypeOf((*Job)(nil))
-
-func setJob(worker Worker, job *Job) {
-	val := reflect.ValueOf(worker)
-	if val.Kind() != reflect.Ptr {
-		return
-	}
-	wstruct := val.Elem()
-	if wstruct.Kind() != reflect.Struct {
-		return
-	}
-	wtype := wstruct.Type()
-	for i := 0; i < wtype.NumField(); i++ {
-		field := wtype.Field(i)
-		if field.Type == typeOfJob {
-			wstruct.Field(i).Set(reflect.ValueOf(job))
-			break
-		}
-	}
-}
-
 func (w *WorkerConfig) worker(id string) {
+	injector := inject.New()
+	injector.SetParent(w.Injector)
 	for msg := range w.workQueue {
 		if msg.die {
 			break
@@ -370,20 +350,29 @@ func (w *WorkerConfig) worker(id string) {
 
 		// wrap Perform() in a function so that we can recover from panics
 		var err error
-		var worker Worker
+		var worker interface{}
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
 					err = newPanicError(r)
 				}
 			}()
-			worker = reflect.New(typ).Interface().(Worker)
-			err = json.Unmarshal(*job.Args, worker)
+			workerVal := reflect.New(typ)
+			worker = workerVal.Interface()
+			if err = json.Unmarshal(*job.Args, worker); err != nil {
+				return
+			}
+			injector.Map(job)
+			if err = w.Apply(worker); err != nil {
+				return
+			}
+			res, err := injector.Invoke(workerVal.MethodByName("Perform").Interface())
 			if err != nil {
 				return
 			}
-			setJob(worker, job)
-			err = worker.Perform()
+			if resErr := res[0].Interface(); resErr != nil {
+				err = resErr.(error)
+			}
 		}()
 		if err != nil {
 			report := true
@@ -534,8 +523,21 @@ func workerID(i int) string {
 	return fmt.Sprintf("%s:%d-%d", hostname, pid, i)
 }
 
-func workerType(worker Worker) reflect.Type {
-	return reflect.Indirect(reflect.ValueOf(worker)).Type()
+func validateWorker(worker interface{}) reflect.Type {
+	t := reflect.ValueOf(worker).Type()
+	perform, ok := t.MethodByName("Perform")
+	if !ok {
+		panic(fmt.Sprintf("%T doesn't have a Perform method", worker))
+	}
+	if perform.Type.NumOut() != 1 || perform.Type.Out(0) != typeOfError {
+		panic(fmt.Sprintf("%T doesn't have a Perform method that returns error"))
+	}
+	return workerType(worker)
+}
+
+func workerType(worker interface{}) reflect.Type {
+	t := reflect.Indirect(reflect.ValueOf(worker)).Type()
+	return t
 }
 
 type UnknownWorkerError struct{ Type string }

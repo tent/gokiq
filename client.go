@@ -19,7 +19,6 @@ type jobMap map[reflect.Type]JobConfig
 type ClientConfig struct {
 	RedisPool      *redis.Pool
 	RedisNamespace string
-	Fake           bool
 
 	jobMapping  jobMap
 	knownQueues map[string]struct{}
@@ -34,13 +33,13 @@ func NewClientConfig() *ClientConfig {
 	}
 }
 
-func (c *ClientConfig) Register(worker Worker, queue string, retries int) {
+func (c *ClientConfig) Register(worker interface{}, queue string, retries int) {
 	t := workerType(worker)
 	c.jobMapping[t] = JobConfig{Queue: queue, MaxRetries: retries, Name: t.Name()}
 	c.trackQueue(queue)
 }
 
-func (c *ClientConfig) RegisterName(name string, worker Worker, queue string, retries int) {
+func (c *ClientConfig) RegisterName(name string, worker interface{}, queue string, retries int) {
 	c.jobMapping[workerType(worker)] = JobConfig{Queue: queue, MaxRetries: retries, Name: name}
 	c.trackQueue(queue)
 }
@@ -59,7 +58,7 @@ func (c *ClientConfig) init() {
 	c.redisQuery("SADD", queues...)
 }
 
-func (c *ClientConfig) QueueJob(worker Worker) error {
+func (c *ClientConfig) QueueJob(worker interface{}) error {
 	c.initOnce.Do(func() { c.init() })
 	config, ok := c.jobMapping[workerType(worker)]
 	if !ok {
@@ -68,7 +67,7 @@ func (c *ClientConfig) QueueJob(worker Worker) error {
 	return c.queueJob(worker, config)
 }
 
-func (c *ClientConfig) QueueJobConfig(worker Worker, config JobConfig) error {
+func (c *ClientConfig) QueueJobConfig(worker interface{}, config JobConfig) error {
 	c.initOnce.Do(func() { c.init() })
 	if baseConfig, ok := c.jobMapping[workerType(worker)]; ok {
 		if config.Name == "" {
@@ -82,7 +81,7 @@ func (c *ClientConfig) QueueJobConfig(worker Worker, config JobConfig) error {
 	return c.queueJob(worker, config)
 }
 
-func (c *ClientConfig) queueJob(worker Worker, config JobConfig) error {
+func (c *ClientConfig) queueJob(worker interface{}, config JobConfig) error {
 	data, err := json.Marshal(worker)
 	if err != nil {
 		return err
@@ -93,9 +92,6 @@ func (c *ClientConfig) queueJob(worker Worker, config JobConfig) error {
 		Args:  &args,
 		Retry: config.MaxRetries,
 		ID:    generateJobID(),
-	}
-	if c.Fake {
-		return worker.Perform()
 	}
 
 	if config.At.IsZero() {
