@@ -2,6 +2,7 @@ package gokiq
 
 import (
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -91,7 +92,7 @@ func (c *ClientConfig) queueJob(worker interface{}, config JobConfig) error {
 		Type:  config.Name,
 		Args:  &args,
 		Retry: config.MaxRetries,
-		ID:    generateJobID(),
+		ID:    uuid(),
 	}
 
 	if config.At.IsZero() {
@@ -127,10 +128,16 @@ func (c *ClientConfig) nsKey(key string) string {
 	return key
 }
 
-func generateJobID() string {
-	b := make([]byte, 8)
-	io.ReadFull(rand.Reader, b)
-	return fmt.Sprintf("%x", b)
+func uuid() string {
+	var id [16]byte
+	if _, err := io.ReadFull(rand.Reader, id[:]); err != nil {
+		panic(err)
+	}
+	id[6] &= 0x0F // clear version
+	id[6] |= 0x40 // set version to 4 (random uuid)
+	id[8] &= 0x3F // clear variant
+	id[8] |= 0x80 // set to IETF variant
+	return hex.EncodeToString(id[:])
 }
 
 type JobConfig struct {
