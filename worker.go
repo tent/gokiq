@@ -366,7 +366,8 @@ func (w *WorkerConfig) worker(id string) {
 			if err = injector.Apply(worker); err != nil {
 				return
 			}
-			res, err := injector.Invoke(workerVal.MethodByName("Perform").Interface())
+			var res []reflect.Value
+			res, err = injector.Invoke(workerVal.MethodByName("Perform").Interface())
 			if err != nil {
 				return
 			}
