@@ -370,7 +370,7 @@ func (w *WorkerConfig) worker(id string) {
 			if err != nil {
 				return
 			}
-			if resErr := res[0].Interface(); resErr != nil {
+			if resErr := res[0].Interface(); resErr != nil && resErr.(error) != nil {
 				err = resErr.(error)
 			}
 		}()
