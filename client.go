@@ -21,6 +21,9 @@ type ClientConfig struct {
 	RedisPool      *redis.Pool
 	RedisNamespace string
 
+	TestMode  bool
+	TestQueue []interface{}
+
 	jobMapping  jobMap
 	knownQueues map[string]struct{}
 	initOnce    sync.Once
@@ -83,6 +86,11 @@ func (c *ClientConfig) QueueJobConfig(worker interface{}, config JobConfig) erro
 }
 
 func (c *ClientConfig) queueJob(worker interface{}, config JobConfig) error {
+	if c.TestMode {
+		c.TestQueue = append(c.TestQueue, worker)
+		return nil
+	}
+
 	data, err := json.Marshal(worker)
 	if err != nil {
 		return err
