@@ -23,14 +23,14 @@ var workChan = make(chan struct{})
 
 type TestWorker struct {
 	Data []string `json:"args"`
-	Job  *Job     `json:"-"`
+	Job  *Job     `inject:"t" json:"-"`
 }
 
 func (w *TestWorker) Perform(job *Job) error {
-	if w.Data[0] == "foo" && job != nil {
+	if w.Data[0] == "foo" && job != nil && w.Job != nil && job == w.Job {
 		workChan <- struct{}{}
 	} else {
-		fmt.Printf("error: %#v %#v\n", w.Data, job)
+		fmt.Printf("error: %#v %#v %#v\n", w.Data, job, w.Job)
 	}
 	return nil
 }

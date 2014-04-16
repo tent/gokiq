@@ -16,8 +16,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/codegangsta/inject"
 	"github.com/garyburd/redigo/redis"
+	"github.com/titanous/inject"
 )
 
 type Job struct {
@@ -363,7 +363,7 @@ func (w *WorkerConfig) worker(id string) {
 				return
 			}
 			injector.Map(job)
-			if err = w.Apply(worker); err != nil {
+			if err = injector.Apply(worker); err != nil {
 				return
 			}
 			res, err := injector.Invoke(workerVal.MethodByName("Perform").Interface())
