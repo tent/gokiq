@@ -16,8 +16,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/codegangsta/inject"
 	"github.com/garyburd/redigo/redis"
-	"github.com/titanous/inject"
 )
 
 type Job struct {

@@ -23,7 +23,7 @@ var workChan = make(chan struct{})
 
 type TestWorker struct {
 	Data []string `json:"args"`
-	Job  *Job     `inject:"t" json:"-"`
+	Job  *Job     `inject`
 }
 
 func (w *TestWorker) Perform(job *Job) error {
