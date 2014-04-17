@@ -314,6 +314,7 @@ func (w *WorkerConfig) requeueJobs() {
 	for queue, jobs := range jobQueues {
 		jobJSON := make([]interface{}, len(jobs)+1)
 		for i, job := range jobs {
+			job.RetryCount++
 			jobJSON[i+1] = job.JSON()
 		}
 		jobJSON[0] = w.nsKey("queue:" + queue)
@@ -399,7 +400,7 @@ func (w *WorkerConfig) scheduleRetry(job *Job, err error, report bool) {
 	if job.RetryCount > 0 {
 		job.RetriedAt = now
 	}
-	job.RetryCount += 1
+	job.RetryCount++
 
 	log.Printf("event=job_error job_id=%s job_type=%s queue=%s retries=%d max_retries=%d error_type=%T error_message=%q pid=%d", job.ID, job.Type, job.Queue, job.RetryCount, job.MaxRetries, err, err, pid)
 
