@@ -396,11 +396,12 @@ func (w *WorkerConfig) scheduleRetry(job *Job, err error, report bool) {
 	now := time.Now().UTC().Format(TimestampFormat)
 	if job.FailedAt == "" {
 		job.FailedAt = now
+	} else {
+		job.RetryCount++
 	}
 	if job.RetryCount > 0 {
 		job.RetriedAt = now
 	}
-	job.RetryCount++
 
 	log.Printf("event=job_error job_id=%s job_type=%s queue=%s retries=%d max_retries=%d error_type=%T error_message=%q pid=%d", job.ID, job.Type, job.Queue, job.RetryCount, job.MaxRetries, err, err, pid)
 
